@@ -130,7 +130,20 @@ class SimpleRouterWrapper(torch.nn.Module):
         start_time = time.perf_counter()
 
         # Get routing decision
-        routing_weights, expert_indices = self.router(x)
+        # Handle different router output formats
+        router_output = self.router(x)
+
+        # Case 1: Router returns (weights, indices) tuple
+        if isinstance(router_output, tuple) and len(router_output) == 2:
+            routing_weights, expert_indices = router_output
+        # Case 2: Router returns only logits (e.g., Mixtral gate)
+        else:
+            router_logits = router_output
+            # Compute routing weights and select top-k experts
+            routing_weights = torch.nn.functional.softmax(router_logits, dim=-1)
+            # Assume top_k=2 for Mixtral, adjust if needed
+            top_k = getattr(self.router, 'top_k', 2)
+            routing_weights, expert_indices = torch.topk(routing_weights, top_k, dim=-1)
 
         # Synchronize and record latency
         if self.use_cuda_events:
@@ -209,7 +222,12 @@ class SimpleRouterWrapper(torch.nn.Module):
 
         self.metrics.step_count = self.current_step
 
-        return routing_weights, expert_indices
+        # Return in the same format as the original router
+        if isinstance(router_output, tuple):
+            return routing_weights, expert_indices
+        else:
+            # Return only logits to match Mixtral gate behavior
+            return router_logits
     
     def reset_metrics(self):
         """Clear all recorded metrics"""
