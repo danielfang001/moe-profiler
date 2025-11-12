@@ -345,17 +345,26 @@ class MoEProfiler:
         
     def _wrap_routers(self):
         """Find and wrap all MoE routers in the model"""
+        # Collect all router modules first to avoid iteration issues
+        routers_to_wrap = []
         for name, module in self.model.named_modules():
+            # Skip if already wrapped
+            if isinstance(module, SimpleRouterWrapper):
+                continue
             if 'router' in name.lower() or 'gate' in name.lower():
-                # Replace with wrapper
-                wrapper = SimpleRouterWrapper(module)
-                self.wrappers.append(wrapper)
-                # Set it in the model
-                parent_name = '.'.join(name.split('.')[:-1])
-                child_name = name.split('.')[-1]
-                if parent_name:
-                    parent = self.model.get_submodule(parent_name)
-                    setattr(parent, child_name, wrapper)
+                routers_to_wrap.append((name, module))
+
+        # Now wrap them
+        for name, module in routers_to_wrap:
+            # Create wrapper
+            wrapper = SimpleRouterWrapper(module)
+            self.wrappers.append(wrapper)
+            # Set it in the model
+            parent_name = '.'.join(name.split('.')[:-1])
+            child_name = name.split('.')[-1]
+            if parent_name:
+                parent = self.model.get_submodule(parent_name)
+                setattr(parent, child_name, wrapper)
                     
     def start(self):
         """Start profiling"""
