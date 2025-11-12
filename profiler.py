@@ -38,8 +38,13 @@ class Metrics:
 
     def to_df(self):
         """Convert to pandas DataFrame for easy analysis"""
+        n = len(self.flops_per_token)
+
+        # Pad semantic_confidence if not populated
+        semantic_conf = self.semantic_confidence if len(self.semantic_confidence) == n else [0.0] * n
+
         return pd.DataFrame({
-            'step': range(len(self.flops_per_token)),
+            'step': range(n),
             'flops_total': self.flops_per_token,
             'flops_router': self.router_flops_per_token,
             'flops_expert': self.expert_flops_per_token,
@@ -47,7 +52,7 @@ class Metrics:
             'k_avg': self.k_per_token,
             'latency_ms': self.latency_ms,
             'router_conf': self.router_confidence,
-            'semantic_conf': self.semantic_confidence,
+            'semantic_conf': semantic_conf,
             'memory_mb': self.memory_mb,
             'timestamp': self.timestamps,
             'device': self.device
