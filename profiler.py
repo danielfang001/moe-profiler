@@ -218,7 +218,9 @@ class SimpleRouterWrapper(torch.nn.Module):
                 self.metrics.expert_loads[expert_id] += 1
 
         # Calculate confidence (entropy-based)
-        confidence = 1.0 - (-torch.sum(routing_weights * torch.log(routing_weights + 1e-10), dim=-1).mean().item() / torch.log(torch.tensor(self.num_experts)))
+        entropy = -torch.sum(routing_weights * torch.log(routing_weights + 1e-10), dim=-1).mean()
+        max_entropy = torch.log(torch.tensor(self.num_experts, dtype=torch.float32))
+        confidence = float(1.0 - (entropy / max_entropy).item())
         self.metrics.router_confidence.append(confidence)
 
         # Memory tracking
