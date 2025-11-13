@@ -180,7 +180,7 @@ class SimpleRouterWrapper(torch.nn.Module):
 
         # Store k distribution and average k
         self.metrics.k_distribution.append(k_per_token_list)
-        avg_k = sum(k_per_token_list) / len(k_per_token_list)
+        avg_k = sum(k_per_token_list) / len(k_per_token_list) if len(k_per_token_list) > 0 else 0
         self.metrics.k_per_token.append(avg_k)
 
         # Count unique active experts across all tokens
@@ -356,7 +356,23 @@ class MoEProfiler:
             # Skip if already wrapped
             if isinstance(module, SimpleRouterWrapper):
                 continue
-            if 'router' in name.lower() or 'gate' in name.lower():
+
+            # Check module type names for MoE-specific classes
+            module_type = type(module).__name__
+
+            # Match router modules by name or type
+            # - Mixtral: 'gate' module in block_sparse_moe
+            # - OLMoE: has 'OlmoeSparseMoeBlock' or similar
+            # - General: 'router' in name
+            is_moe_router = (
+                ('router' in name.lower()) or
+                ('gate' in name.lower() and 'gate_proj' not in name.lower()) or
+                ('SparseMoe' in module_type and 'Block' in module_type) or
+                ('MoeLayer' in module_type)
+            )
+
+            if is_moe_router:
+                print(f"Found MoE module: {name} (type: {module_type})")
                 # Replace with wrapper
                 wrapper = SimpleRouterWrapper(module)
                 self.wrappers.append(wrapper)
