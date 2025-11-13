@@ -360,19 +360,17 @@ class MoEProfiler:
             # Check module type names for MoE-specific classes
             module_type = type(module).__name__
 
-            # Match router modules by name or type
-            # - Mixtral: 'gate' module in block_sparse_moe
-            # - OLMoE: has 'OlmoeSparseMoeBlock' or similar
+            # Match only gate/router modules (not the entire MoE block)
+            # - Mixtral: 'gate' in 'block_sparse_moe.gate'
+            # - OLMoE: 'gate' in 'mlp.gate' (Linear module inside OlmoeSparseMoeBlock)
             # - General: 'router' in name
-            is_moe_router = (
-                ('router' in name.lower()) or
-                ('gate' in name.lower() and 'gate_proj' not in name.lower()) or
-                ('SparseMoe' in module_type and 'Block' in module_type) or
-                ('MoeLayer' in module_type)
+            is_gate_or_router = (
+                ('router' in name.lower() and 'gate_proj' not in name.lower()) or
+                (name.endswith('.gate') and 'gate_proj' not in name.lower())
             )
 
-            if is_moe_router:
-                print(f"Found MoE module: {name} (type: {module_type})")
+            if is_gate_or_router:
+                print(f"Wrapping router: {name} (type: {module_type})")
                 # Replace with wrapper
                 wrapper = SimpleRouterWrapper(module)
                 self.wrappers.append(wrapper)
