@@ -151,6 +151,8 @@ class SimpleRouterWrapper(torch.nn.Module):
             # Assume top_k=2 for Mixtral, adjust if needed
             top_k = getattr(self.router, 'top_k', 2)
             routing_weights, expert_indices = torch.topk(routing_weights, top_k, dim=-1)
+            print("routing_weights",routing_weights,flush=True)
+            print("expert_indices",expert_indices,flush=True)
 
         # Synchronize and record latency
         if self.use_cuda_events:
