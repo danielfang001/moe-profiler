@@ -138,6 +138,16 @@ class SimpleRouterWrapper(torch.nn.Module):
         # Handle different router output formats
         router_output = self.router(x)
 
+        # Early unconditional debug log so we always know the wrapper ran.
+        # This helps when prints in specific branches don't appear (e.g., logits vs tuple outputs,
+        # or sampling/warmup skipping). It prints the wrapper step and the type of router output.
+        try:
+            print(f"[MOEPROFILER] SimpleRouterWrapper called step={self.current_step} router_output_type={type(router_output)}",
+                  flush=True)
+        except Exception:
+            # If printing ever fails (rare), don't break the forward pass
+            pass
+
         # Case 1: Router returns (weights, indices) tuple
         if isinstance(router_output, tuple) and len(router_output) == 2:
             routing_weights, expert_indices = router_output
