@@ -119,17 +119,15 @@ class SimpleRouterWrapper(torch.nn.Module):
             self.expert_dim = self.hidden_dim * 4
         
     def forward(self, x):
-        if not self.enabled:
-            return self.router(x)
+        #if not self.enabled:
+        #    return self.router(x)
 
         self.current_step += 1
 
         # Always write a tiny entry when forward is entered so we can confirm
         # the wrapper is being invoked even when profiling is skipped.
         try:
-            wrapper_name = self.name if getattr(self, 'name', None) is not None else '<unknown>'
-            with open('/tmp/moeprofiler_debug.log', 'a') as _f:
-                _f.write(f"{time.time():.3f}\tPID={os.getpid()}\twrapper={wrapper_name}\tentered_step={self.current_step}\tenabled={self.enabled}\twarmup={self.warmup_steps}\tsampling={self.sampling_rate}\n")
+            print("forward",flush=True)
         except Exception:
             # never raise from logging
             pass
