@@ -156,10 +156,9 @@ class SimpleRouterWrapper(torch.nn.Module):
             routing_weights, expert_indices = torch.topk(routing_probs, 8, dim=-1)
 
         # Calculate confidence (entropy-based)
-        psum = torch.sum(routing_probs**2)
-        pcutoff = (64/63)*psum-(1/63)
+        pcutoff = torch.sum(routing_probs**2)
+        #pcutoff = (64/63)*psum-(1/63)
         print("pcutoff",pcutoff,flush=True)
-        print("routing_probs",routing_probs.shape,flush=True)
         # entropy = -torch.sum(routing_weights * torch.log(routing_weights + 1e-10), dim=-1).mean()
         # max_entropy = torch.log(torch.tensor(self.num_experts, dtype=torch.float32))
         # confidence = float(1.0 - (entropy / max_entropy).item())
@@ -199,11 +198,9 @@ class SimpleRouterWrapper(torch.nn.Module):
         self.metrics.k_per_token.append(avg_k)
 
         sorted_probs, indices = torch.sort(routing_probs, descending=True)
-        # Compute cumulative sum
         cumsum = torch.cumsum(sorted_probs, dim=0)
-        # Find first index where cumsum >= pcutoff
         mask = cumsum <= pcutoff
-        k = torch.sum(mask.float())+1
+        k = torch.sum(mask.float()).item()+1
         print("activated experts",k)
 
         self.metrics.active_experts.append(k)
