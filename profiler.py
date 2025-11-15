@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from pathlib import Path
 
+# Centralized log path (can be overridden by environment)
+LOG_PATH = Path(os.environ.get('MOEPROFILER_LOG', '/tmp/moeprofiler_debug.log'))
+
 # ============================================
 # 1. SIMPLE METRIC TRACKER
 # ============================================
@@ -136,7 +139,7 @@ class SimpleRouterWrapper(torch.nn.Module):
             )
             # best-effort file log
             try:
-                with open('/tmp/moeprofiler_debug.log', 'a') as _f:
+                with open(str(LOG_PATH), 'a') as _f:
                     _f.write(entry_line)
             except Exception:
                 pass
@@ -175,8 +178,11 @@ class SimpleRouterWrapper(torch.nn.Module):
                 f"{time.time():.3f}\tPID={os.getpid()}\twrapper={wrapper_name}\tstep={self.current_step}"
                 f"\trouter_output_type={type(router_output)}\n"
             )
-            with open('/tmp/moeprofiler_debug.log', 'a') as _f:
-                _f.write(log_line)
+            try:
+                with open(str(LOG_PATH), 'a') as _f:
+                    _f.write(log_line)
+            except Exception:
+                pass
         except Exception:
             # Never fail the forward pass due to logging
             pass
@@ -395,6 +401,18 @@ class MoEProfiler:
     def __init__(self, model):
         self.model = model
         self.wrappers = []
+        # Ensure log file exists (best-effort) so we can diagnose missing logs
+        try:
+            LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(str(LOG_PATH), 'a') as _f:
+                _f.write(f"{time.time():.3f}\tPID={os.getpid()}\tLOG_INIT\n")
+        except Exception:
+            # Non-fatal: if /tmp isn't writable in this environment we'll fall back to stderr-only logging
+            try:
+                os.write(2, (f"LOG_INIT_FAILED PID={os.getpid()}\n").encode())
+            except Exception:
+                pass
+
         self._wrap_routers()
         
     def _wrap_routers(self):
@@ -496,7 +514,7 @@ class MoEProfiler:
                 'current_step': int(getattr(w, 'current_step', 0))
             })
         try:
-            with open('/tmp/moeprofiler_debug.log', 'a') as f:
+            with open(str(LOG_PATH), 'a') as f:
                 f.write(f"{time.time():.3f}\tPID={os.getpid()}\tDUMP_WRAPPERS\t{info}\n")
         except Exception:
             pass
