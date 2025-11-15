@@ -35,6 +35,7 @@ class Metrics:
     semantic_confidence: List[float] = field(default_factory=list)
     memory_mb: List[float] = field(default_factory=list)
     timestamps: List[float] = field(default_factory=list)
+    routerweights: List[float] = field(default_factory=list)
 
     # Metadata
     device: str = 'cuda:0'
@@ -56,6 +57,7 @@ class Metrics:
             'k_avg': self.k_per_token,
             'latency_ms': self.latency_ms,
             'router_conf': self.router_confidence,
+            'router_weights': self.routerweights,
             'semantic_conf': semantic_conf,
             'memory_mb': self.memory_mb,
             'timestamp': self.timestamps,
@@ -334,6 +336,7 @@ class SimpleRouterWrapper(torch.nn.Module):
             # Confidence metrics
             'router_confidence_mean': df['router_conf'].mean(),
             'router_confidence_std': df['router_conf'].std(),
+            'router_confidence_weights': df['router_weights'],
 
             # Memory
             'memory_mean_mb': df['memory_mb'].mean() if 'memory_mb' in df and len(df['memory_mb']) > 0 else 0,
@@ -519,6 +522,7 @@ class MoEProfiler:
                 for k, v in summary.items():
                     if k.startswith('total_'):
                         print(f"    {k:30s}: {v:>12.2f}" if isinstance(v, float) else f"    {k:30s}: {v:>12}")
+                
             else:
                 print(f"  {summary}")
 
