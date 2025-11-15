@@ -67,7 +67,7 @@ class SimpleRouterWrapper(torch.nn.Module):
     """
 
     def __init__(self, original_router, num_experts=8, expert_dim=None, hidden_dim=None,
-                 warmup_steps=5, sampling_rate=1):
+                 warmup_steps=5, sampling_rate=1, name: Optional[str]=None):
         """
         Args:
             original_router: The original router to wrap
@@ -79,6 +79,8 @@ class SimpleRouterWrapper(torch.nn.Module):
         """
         super().__init__()
         self.router = original_router
+        # Optional name of the wrapped module (set by MoEProfiler)
+        self.name = name
         self.num_experts = num_experts
         self.expert_dim = expert_dim  # Expert FFN dimension
         self.hidden_dim = hidden_dim  # Model hidden dimension
@@ -142,7 +144,8 @@ class SimpleRouterWrapper(torch.nn.Module):
         # This helps when prints in specific branches don't appear (e.g., logits vs tuple outputs,
         # or sampling/warmup skipping). It prints the wrapper step and the type of router output.
         try:
-            print(f"[MOEPROFILER] SimpleRouterWrapper called step={self.current_step} router_output_type={type(router_output)}",
+            wrapper_name = self.name if getattr(self, 'name', None) is not None else '<unknown>'
+            print(f"[MOEPROFILER] SimpleRouterWrapper '{wrapper_name}' called step={self.current_step} router_output_type={type(router_output)}",
                   flush=True)
         except Exception:
             # If printing ever fails (rare), don't break the forward pass
@@ -385,15 +388,37 @@ class MoEProfiler:
 
             if is_gate_or_router:
                 print(f"Wrapping router: {name} (type: {module_type})")
-                # Replace with wrapper
-                wrapper = SimpleRouterWrapper(module)
+                # Replace with wrapper and record the original module name
+                wrapper = SimpleRouterWrapper(module, name=name)
                 self.wrappers.append(wrapper)
-                # Set it in the model
+
+                # Determine parent module and child attribute name and set the wrapper
                 parent_name = '.'.join(name.split('.')[:-1])
                 child_name = name.split('.')[-1]
                 if parent_name:
                     parent = self.model.get_submodule(parent_name)
-                    setattr(parent, child_name, wrapper)
+                else:
+                    parent = self.model
+
+                setattr(parent, child_name, wrapper)
+
+                # Move wrapper to model device (if model has parameters/buffers on a device)
+                model_device = None
+                try:
+                    model_device = next(self.model.parameters()).device
+                except StopIteration:
+                    try:
+                        model_device = next(self.model.buffers()).device
+                    except StopIteration:
+                        model_device = None
+
+                if model_device is not None:
+                    try:
+                        wrapper.to(model_device)
+                        print(f"Moved wrapper '{name}' to device {model_device}")
+                    except Exception:
+                        # Non-fatal: don't break wrapping if move fails
+                        print(f"Warning: failed to move wrapper '{name}' to device {model_device}")
                     
     def start(self):
         """Start profiling"""
