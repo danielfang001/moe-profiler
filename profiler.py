@@ -124,12 +124,30 @@ class SimpleRouterWrapper(torch.nn.Module):
 
         self.current_step += 1
 
-        # Always write a tiny entry when forward is entered so we can confirm
-        # the wrapper is being invoked even when profiling is skipped.
+        # Always write a tiny, unconditional entry when forward is entered so we
+        # can confirm the wrapper is being invoked even when profiling is skipped
+        # (warmup/sampling) or when stdout is captured. We write both to a
+        # file in /tmp and directly to stderr using os.write to avoid stdio
+        # buffering/capture in some environments.
         try:
-            print("forward",flush=True)
+            wrapper_name = self.name if getattr(self, 'name', None) is not None else '<unknown>'
+            entry_line = (
+                f"{time.time():.3f}\tPID={os.getpid()}\twrapper={wrapper_name}\tstep={self.current_step}\tENTRY\n"
+            )
+            # best-effort file log
+            try:
+                with open('/tmp/moeprofiler_debug.log', 'a') as _f:
+                    _f.write(entry_line)
+            except Exception:
+                pass
+
+            # unbuffered stderr write (bypasses python buffering / capture)
+            try:
+                os.write(2, entry_line.encode())
+            except Exception:
+                pass
         except Exception:
-            # never raise from logging
+            # never fail the forward pass because logging failed
             pass
 
         # Skip warmup steps
@@ -462,6 +480,31 @@ class MoEProfiler:
             combined = pd.concat(dfs)
             combined.to_csv(filepath, index=False)
             print(f"Saved {len(combined)} rows to {filepath}")
+
+    def dump_wrapper_states(self):
+        """Return and log a compact state summary for all wrappers.
+
+        This writes a best-effort line to /tmp/moeprofiler_debug.log and to
+        stderr (unbuffered), then returns the list of dicts so calling code can
+        inspect it programmatically.
+        """
+        info = []
+        for w in self.wrappers:
+            info.append({
+                'name': getattr(w, 'name', '<unknown>'),
+                'enabled': bool(getattr(w, 'enabled', False)),
+                'current_step': int(getattr(w, 'current_step', 0))
+            })
+        try:
+            with open('/tmp/moeprofiler_debug.log', 'a') as f:
+                f.write(f"{time.time():.3f}\tPID={os.getpid()}\tDUMP_WRAPPERS\t{info}\n")
+        except Exception:
+            pass
+        try:
+            os.write(2, (f"DUMP_WRAPPERS: {info}\n").encode())
+        except Exception:
+            pass
+        return info
     
     def print_summary(self):
         """Print comprehensive statistical summary"""
