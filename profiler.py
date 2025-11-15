@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 from pathlib import Path
 
 # Centralized log path (can be overridden by environment)
-LOG_PATH = Path(os.environ.get('MOEPROFILER_LOG', '/tmp/moeprofiler_debug.log'))
+LOG_PATH = Path(os.environ.get('MOEPROFILER_LOG', '/root/moeprofiler_debug.log'))
 
 # ============================================
 # 1. SIMPLE METRIC TRACKER
@@ -35,6 +35,10 @@ class Metrics:
     semantic_confidence: List[float] = field(default_factory=list)
     memory_mb: List[float] = field(default_factory=list)
     timestamps: List[float] = field(default_factory=list)
+    # Raw routing outputs (kept as JSON-serializable Python lists to avoid
+    # holding GPU tensors in the metrics container)
+    routing_weights_raw: List = field(default_factory=list)
+    expert_indices_raw: List = field(default_factory=list)
 
     # Metadata
     device: str = 'cuda:0'
@@ -127,32 +131,6 @@ class SimpleRouterWrapper(torch.nn.Module):
 
         self.current_step += 1
 
-        # Always write a tiny, unconditional entry when forward is entered so we
-        # can confirm the wrapper is being invoked even when profiling is skipped
-        # (warmup/sampling) or when stdout is captured. We write both to a
-        # file in /tmp and directly to stderr using os.write to avoid stdio
-        # buffering/capture in some environments.
-        try:
-            wrapper_name = self.name if getattr(self, 'name', None) is not None else '<unknown>'
-            entry_line = (
-                f"{time.time():.3f}\tPID={os.getpid()}\twrapper={wrapper_name}\tstep={self.current_step}\tENTRY\n"
-            )
-            # best-effort file log
-            try:
-                with open(str(LOG_PATH), 'a') as _f:
-                    _f.write(entry_line)
-            except Exception:
-                pass
-
-            # unbuffered stderr write (bypasses python buffering / capture)
-            try:
-                os.write(2, entry_line.encode())
-            except Exception:
-                pass
-        except Exception:
-            # never fail the forward pass because logging failed
-            pass
-
         # Skip warmup steps
         in_warmup = self.current_step <= self.warmup_steps
         should_profile = (self.current_step % self.sampling_rate == 0) and not in_warmup
@@ -186,12 +164,12 @@ class SimpleRouterWrapper(torch.nn.Module):
         except Exception:
             # Never fail the forward pass due to logging
             pass
-
+        
+        router_output
+        
         # Case 1: Router returns (weights, indices) tuple
-        if isinstance(router_output, tuple) and len(router_output) == 2:
+        if isinstance(router_output, tuple):
             routing_weights, expert_indices = router_output
-            print("routing_weights",routing_weights,flush=True)
-            print("expert_indices",expert_indices,flush=True)
         # Case 2: Router returns only logits (e.g., Mixtral gate)
         else:
             router_logits = router_output
@@ -200,8 +178,24 @@ class SimpleRouterWrapper(torch.nn.Module):
             # Assume top_k=2 for Mixtral, adjust if needed
             top_k = getattr(self.router, 'top_k', 2)
             routing_weights, expert_indices = torch.topk(routing_weights, top_k, dim=-1)
-            print("routing_weights",routing_weights,flush=True)
-            print("expert_indices",expert_indices,flush=True)
+
+        # Save raw routing outputs into metrics (convert to CPU Python lists)
+        try:
+            try:
+                rw = routing_weights.detach().cpu().tolist() if isinstance(routing_weights, torch.Tensor) else routing_weights
+            except Exception:
+                rw = routing_weights
+            try:
+                ei = expert_indices.detach().cpu().tolist() if isinstance(expert_indices, torch.Tensor) else expert_indices
+            except Exception:
+                ei = expert_indices
+            try:
+                self.metrics.routing_weights_raw.append(rw)
+                self.metrics.expert_indices_raw.append(ei)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # Synchronize and record latency
         if self.use_cuda_events:
@@ -568,6 +562,32 @@ class MoEProfiler:
                         print(f"    {k:30s}: {v:>12.2f}" if isinstance(v, float) else f"    {k:30s}: {v:>12}")
             else:
                 print(f"  {summary}")
+
+            # Print a small sample of raw routing outputs if available
+            try:
+                if getattr(wrapper, 'metrics', None) and len(wrapper.metrics.routing_weights_raw) > 0:
+                    last_rw = wrapper.metrics.routing_weights_raw[-1]
+                    last_ei = wrapper.metrics.expert_indices_raw[-1] if len(wrapper.metrics.expert_indices_raw) > 0 else None
+                    print("\n  Routing outputs (sample):")
+                    # Show shapes and a small sample to avoid huge dumps
+                    try:
+                        rw_len = len(last_rw)
+                    except Exception:
+                        rw_len = None
+                    print(f"    routing_entries: {rw_len}")
+                    # Print up to first 2 entries for quick inspection
+                    try:
+                        sample_rw = last_rw[:2]
+                        sample_ei = last_ei[:2] if last_ei is not None else None
+                        print(f"    sample_routing_weights: {sample_rw}")
+                        print(f"    sample_expert_indices: {sample_ei}")
+                    except Exception:
+                        # Fallback: print repr of the object
+                        print(f"    routing_weights_repr: {repr(last_rw)[:200]}")
+                        if last_ei is not None:
+                            print(f"    expert_indices_repr: {repr(last_ei)[:200]}")
+            except Exception:
+                pass
 
         print("\n" + "="*60)
 
