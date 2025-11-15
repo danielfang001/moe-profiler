@@ -197,10 +197,10 @@ class SimpleRouterWrapper(torch.nn.Module):
         avg_k = sum(k_per_token_list) / len(k_per_token_list) if len(k_per_token_list) > 0 else 0
         self.metrics.k_per_token.append(avg_k)
 
-        sorted_probs, indices = torch.sort(routing_probs, descending=True)
-        cumsum = torch.cumsum(sorted_probs, dim=0)
+        sorted_probs, indices = torch.sort(routing_probs, descending=True, dim=1)  # Sort along dim=1
+        cumsum = torch.cumsum(sorted_probs, dim=1)  # Cumsum along dim=1
         mask = cumsum <= pcutoff
-        k = torch.sum(mask.float()).item()+1
+        k = torch.sum(mask.float(), dim=1).item() + 1  # Sum along dim=1, then convert to scalar
         print("activated experts",k)
         print("cumsum",cumsum)
 
