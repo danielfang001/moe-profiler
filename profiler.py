@@ -7,6 +7,7 @@ import torch
 import pandas as pd
 import numpy as np
 import time
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -136,19 +137,22 @@ class SimpleRouterWrapper(torch.nn.Module):
 
         start_time = time.perf_counter()
 
-        # Get routing decision
-        # Handle different router output formats
+        # Get routing decision (call the wrapped router)
         router_output = self.router(x)
 
-        # Early unconditional debug log so we always know the wrapper ran.
-        # This helps when prints in specific branches don't appear (e.g., logits vs tuple outputs,
-        # or sampling/warmup skipping). It prints the wrapper step and the type of router output.
+        # Write an unconditional debug entry to a file (safer across processes
+        # and when stdout is captured). Include PID, timestamp, wrapper name and
+        # router output type.
         try:
             wrapper_name = self.name if getattr(self, 'name', None) is not None else '<unknown>'
-            print(f"[MOEPROFILER] SimpleRouterWrapper '{wrapper_name}' called step={self.current_step} router_output_type={type(router_output)}",
-                  flush=True)
+            log_line = (
+                f"{time.time():.3f}\tPID={os.getpid()}\twrapper={wrapper_name}\tstep={self.current_step}"
+                f"\trouter_output_type={type(router_output)}\n"
+            )
+            with open('/tmp/moeprofiler_debug.log', 'a') as _f:
+                _f.write(log_line)
         except Exception:
-            # If printing ever fails (rare), don't break the forward pass
+            # Never fail the forward pass due to logging
             pass
 
         # Case 1: Router returns (weights, indices) tuple
