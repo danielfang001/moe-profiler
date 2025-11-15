@@ -35,7 +35,6 @@ class Metrics:
     semantic_confidence: List[float] = field(default_factory=list)
     memory_mb: List[float] = field(default_factory=list)
     timestamps: List[float] = field(default_factory=list)
-    routerweights: List[float] = field(default_factory=list)
 
     # Metadata
     device: str = 'cuda:0'
@@ -57,7 +56,6 @@ class Metrics:
             'k_avg': self.k_per_token,
             'latency_ms': self.latency_ms,
             'router_conf': self.router_confidence,
-            'router_weights': self.routerweights,
             'semantic_conf': semantic_conf,
             'memory_mb': self.memory_mb,
             'timestamp': self.timestamps,
@@ -144,6 +142,50 @@ class SimpleRouterWrapper(torch.nn.Module):
 
         # Get routing decision (call the wrapped router)
         router_output = self.router(x)
+
+        # Best-effort: log router_output size and a small content sample so we can
+        # inspect what the router returned during generation (doesn't alter return)
+        try:
+            wrapper_name = getattr(self, 'name', '<unknown>')
+
+            def _summarize(obj, max_elems=10):
+                # Return a JSON-serializable summary of tensors / tuples / lists
+                if isinstance(obj, torch.Tensor):
+                    t = obj.detach().cpu()
+                    shape = tuple(t.size())
+                    numel = int(t.numel())
+                    # Take a small sample of values to avoid huge logs
+                    flat = t.reshape(-1)
+                    sample = []
+                    if flat.numel() > 0:
+                        sample = flat[:min(max_elems, flat.numel())].tolist()
+                    return {'type': 'tensor', 'dtype': str(t.dtype), 'shape': shape, 'numel': numel, 'sample': sample}
+                elif isinstance(obj, (list, tuple)):
+                    return [ _summarize(o, max_elems=max_elems) for o in obj ]
+                else:
+                    try:
+                        return {'type': type(obj).__name__, 'repr': str(obj)[:200]}
+                    except Exception:
+                        return {'type': type(obj).__name__, 'repr': '<unserializable>'}
+
+            summary = _summarize(router_output)
+
+            # Write to centralized log file (best-effort)
+            try:
+                with open(str(LOG_PATH), 'a') as _lf:
+                    _lf.write(f"{time.time():.3f}\tPID={os.getpid()}\tROUTER_OUTPUT\t{wrapper_name}\t{summary}\n")
+            except Exception:
+                pass
+
+            # Also write an unbuffered short line to stderr so it shows up in
+            # notebook/remote-captured logs even when stdout is captured.
+            try:
+                os.write(2, (f"ROUTER_OUTPUT {wrapper_name}: {summary}\n").encode())
+            except Exception:
+                pass
+        except Exception:
+            # Never raise from logging
+            pass
         
         # Case 1: Router returns (weights, indices) tuple
         if isinstance(router_output, tuple):
@@ -225,11 +267,10 @@ class SimpleRouterWrapper(torch.nn.Module):
                 self.metrics.expert_loads[expert_id] += 1
 
         # Calculate confidence (entropy-based)
-        length_routingweights = routing_weights.shape()
-        # entropy = -torch.sum(routing_weights * torch.log(routing_weights + 1e-10), dim=-1).mean()
-        # max_entropy = torch.log(torch.tensor(self.num_experts, dtype=torch.float32))
-        # confidence = float(1.0 - (entropy / max_entropy).item())
-        self.metrics.router_confidence.append(length_routingweights)
+        entropy = -torch.sum(routing_weights * torch.log(routing_weights + 1e-10), dim=-1).mean()
+        max_entropy = torch.log(torch.tensor(self.num_experts, dtype=torch.float32))
+        confidence = float(1.0 - (entropy / max_entropy).item())
+        self.metrics.router_confidence.append(confidence)
 
         # Memory tracking
         if torch.cuda.is_available():
@@ -336,7 +377,6 @@ class SimpleRouterWrapper(torch.nn.Module):
             # Confidence metrics
             'router_confidence_mean': df['router_conf'].mean(),
             'router_confidence_std': df['router_conf'].std(),
-            'router_confidence_weights': df['router_weights'],
 
             # Memory
             'memory_mean_mb': df['memory_mb'].mean() if 'memory_mb' in df and len(df['memory_mb']) > 0 else 0,
