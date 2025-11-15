@@ -141,6 +141,8 @@ class SimpleRouterWrapper(torch.nn.Module):
         # Case 1: Router returns (weights, indices) tuple
         if isinstance(router_output, tuple) and len(router_output) == 2:
             routing_weights, expert_indices = router_output
+            print("routing_weights",routing_weights,flush=True)
+            print("expert_indices",expert_indices,flush=True)
         # Case 2: Router returns only logits (e.g., Mixtral gate)
         else:
             router_logits = router_output
