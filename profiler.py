@@ -198,17 +198,16 @@ class SimpleRouterWrapper(torch.nn.Module):
         avg_k = sum(k_per_token_list) / len(k_per_token_list) if len(k_per_token_list) > 0 else 0
         self.metrics.k_per_token.append(avg_k)
 
-        # Count unique active experts across all tokens
-        #unique_experts = len(torch.unique(expert_indices[expert_indices >= 0]))
-        sorted_probs, _ = torch.sort(routing_probs, descending=True)
-    
-        # Compute the cumulative sum
-        cumulative_sum = torch.cumsum(sorted_probs, dim=0)
+        sorted_probs, indices = torch.sort(routing_probs, descending=True)
         
-        # Find the index where the cumulative sum first exceeds or equals pcutoff
-        count = (cumulative_sum >= pcutoff).nonzero(as_tuple=True)[0].item() + 1
+        # Compute cumulative sum
+        cumsum = torch.cumsum(sorted_probs, dim=0)
+        
+        # Find first index where cumsum >= pcutoff
+        mask = cumsum >= pcutoff
+        k = torch.argmax(mask.float()).item() + 1
 
-        self.metrics.active_experts.append(count)
+        self.metrics.active_experts.append(k)
 
         # Accurate FLOPs calculation with dynamic k
         # Router FLOPs: Linear projection (input @ weight) + softmax
