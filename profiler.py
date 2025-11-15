@@ -158,6 +158,8 @@ class SimpleRouterWrapper(torch.nn.Module):
         # Calculate confidence (entropy-based)
         psum = torch.sum(routing_probs**2)
         pcutoff = (64/63)*psum-(1/63)
+        print("pcutoff",pcutoff.shape,flush=True)
+        print("routing_probs",routing_probs.shape,flush=True)
         # entropy = -torch.sum(routing_weights * torch.log(routing_weights + 1e-10), dim=-1).mean()
         # max_entropy = torch.log(torch.tensor(self.num_experts, dtype=torch.float32))
         # confidence = float(1.0 - (entropy / max_entropy).item())
