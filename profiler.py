@@ -199,13 +199,11 @@ class SimpleRouterWrapper(torch.nn.Module):
         self.metrics.k_per_token.append(avg_k)
 
         sorted_probs, indices = torch.sort(routing_probs, descending=True)
-        
         # Compute cumulative sum
         cumsum = torch.cumsum(sorted_probs, dim=0)
-        
         # Find first index where cumsum >= pcutoff
-        mask = cumsum >= pcutoff
-        k = torch.argmax(mask.float()).item() + 1
+        mask = cumsum <= pcutoff
+        k = torch.sum(mask.float())+1
         print("activated experts",k)
 
         self.metrics.active_experts.append(k)
