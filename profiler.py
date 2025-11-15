@@ -142,62 +142,26 @@ class SimpleRouterWrapper(torch.nn.Module):
 
         # Get routing decision (call the wrapped router)
         router_output = self.router(x)
-
-        # Best-effort: log router_output size and a small content sample so we can
-        # inspect what the router returned during generation (doesn't alter return)
-        try:
-            wrapper_name = getattr(self, 'name', '<unknown>')
-
-            def _summarize(obj, max_elems=10):
-                # Return a JSON-serializable summary of tensors / tuples / lists
-                if isinstance(obj, torch.Tensor):
-                    t = obj.detach().cpu()
-                    shape = tuple(t.size())
-                    numel = int(t.numel())
-                    # Take a small sample of values to avoid huge logs
-                    flat = t.reshape(-1)
-                    sample = []
-                    if flat.numel() > 0:
-                        sample = flat[:min(max_elems, flat.numel())].tolist()
-                    return {'type': 'tensor', 'dtype': str(t.dtype), 'shape': shape, 'numel': numel, 'sample': sample}
-                elif isinstance(obj, (list, tuple)):
-                    return [ _summarize(o, max_elems=max_elems) for o in obj ]
-                else:
-                    try:
-                        return {'type': type(obj).__name__, 'repr': str(obj)[:200]}
-                    except Exception:
-                        return {'type': type(obj).__name__, 'repr': '<unserializable>'}
-
-            summary = _summarize(router_output)
-
-            # Write to centralized log file (best-effort)
-            try:
-                with open(str(LOG_PATH), 'a') as _lf:
-                    _lf.write(f"{time.time():.3f}\tPID={os.getpid()}\tROUTER_OUTPUT\t{wrapper_name}\t{summary}\n")
-            except Exception:
-                pass
-
-            # Also write an unbuffered short line to stderr so it shows up in
-            # notebook/remote-captured logs even when stdout is captured.
-            try:
-                os.write(2, (f"ROUTER_OUTPUT {wrapper_name}: {summary}\n").encode())
-            except Exception:
-                pass
-        except Exception:
-            # Never raise from logging
-            pass
         
         # Case 1: Router returns (weights, indices) tuple
         if isinstance(router_output, tuple):
             routing_weights, expert_indices = router_output
-        # Case 2: Router returns only logits (e.g., Mixtral gate)
+        # Case 2: Router returns only logits (e.g., Mixtral gate, OlMoE)
         else:
             router_logits = router_output
             # Compute routing weights and select top-k experts
-            routing_weights = torch.nn.functional.softmax(router_logits, dim=-1)
+            routing_probs = torch.nn.functional.softmax(router_logits, dim=-1)
             # Assume top_k=2 for Mixtral, adjust if needed
             top_k = getattr(self.router, 'top_k', 2)
-            routing_weights, expert_indices = torch.topk(routing_weights, top_k, dim=-1)
+            routing_weights, expert_indices = torch.topk(routing_probs, 8, dim=-1)
+
+        # Calculate confidence (entropy-based)
+        psum = torch.sum(routing_probs**2)
+        pcutoff = (64/63)*psum-(1/63)
+        # entropy = -torch.sum(routing_weights * torch.log(routing_weights + 1e-10), dim=-1).mean()
+        # max_entropy = torch.log(torch.tensor(self.num_experts, dtype=torch.float32))
+        # confidence = float(1.0 - (entropy / max_entropy).item())
+        self.metrics.router_confidence.append(pcutoff)
 
         # Synchronize and record latency
         if self.use_cuda_events:
@@ -233,8 +197,16 @@ class SimpleRouterWrapper(torch.nn.Module):
         self.metrics.k_per_token.append(avg_k)
 
         # Count unique active experts across all tokens
-        unique_experts = len(torch.unique(expert_indices[expert_indices >= 0]))
-        self.metrics.active_experts.append(unique_experts)
+        #unique_experts = len(torch.unique(expert_indices[expert_indices >= 0]))
+        sorted_probs, _ = torch.sort(routing_probs, descending=True)
+    
+        # Compute the cumulative sum
+        cumulative_sum = torch.cumsum(sorted_probs, dim=0)
+        
+        # Find the index where the cumulative sum first exceeds or equals pcutoff
+        count = (cumulative_sum >= pcutoff).nonzero(as_tuple=True)[0].item() + 1
+
+        self.metrics.active_experts.append(count)
 
         # Accurate FLOPs calculation with dynamic k
         # Router FLOPs: Linear projection (input @ weight) + softmax
@@ -265,12 +237,6 @@ class SimpleRouterWrapper(torch.nn.Module):
         for expert_id in expert_indices.flatten().tolist():
             if 0 <= expert_id < self.num_experts:
                 self.metrics.expert_loads[expert_id] += 1
-
-        # Calculate confidence (entropy-based)
-        entropy = -torch.sum(routing_weights * torch.log(routing_weights + 1e-10), dim=-1).mean()
-        max_entropy = torch.log(torch.tensor(self.num_experts, dtype=torch.float32))
-        confidence = float(1.0 - (entropy / max_entropy).item())
-        self.metrics.router_confidence.append(confidence)
 
         # Memory tracking
         if torch.cuda.is_available():
