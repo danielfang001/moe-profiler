@@ -202,6 +202,7 @@ class SimpleRouterWrapper(torch.nn.Module):
         mask = cumsum <= pcutoff
         k = torch.sum(mask.float(), dim=1).item() + 1  # Sum along dim=1, then convert to scalar
         print("activated experts",k)
+        print("sorted_probs",sorted_probs)
         print("cumsum",cumsum)
 
         self.metrics.active_experts.append(k)
