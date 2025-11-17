@@ -159,7 +159,7 @@ class SimpleRouterWrapper(torch.nn.Module):
         # Assume expert FFN dim is 4x hidden for MoE models
         if self.expert_dim is None:
             self.expert_dim = self.hidden_dim * 4
-        
+
     def forward(self, x):
         if not self.enabled:
             return self.router(x)
@@ -181,7 +181,7 @@ class SimpleRouterWrapper(torch.nn.Module):
 
         # Get routing decision (call the wrapped router)
         router_output = self.router(x)
-        
+
         # Case 1: Router returns (weights, indices) tuple
         if isinstance(router_output, tuple):
             routing_weights, expert_indices = router_output
@@ -288,7 +288,7 @@ class SimpleRouterWrapper(torch.nn.Module):
         else:
             # Return only logits to match Mixtral gate behavior
             return router_logits
-    
+
     def reset_metrics(self):
         """Clear all recorded metrics"""
         self.metrics = Metrics()
@@ -355,7 +355,7 @@ class SelectableRouterWrapper(torch.nn.Module):
                     routing_probs = orig_weights
             except Exception:
                 routing_probs = orig_weights
-        else:
+        else: # This is always the case for OLMoE and the toy demo
             router_logits = router_out
             routing_probs = torch.nn.functional.softmax(router_logits, dim=-1)
 
@@ -900,7 +900,7 @@ def run_selector_demo_no_torch():
 
 class MoEProfiler:
     """Simple profiler for experiments"""
-    
+
     def __init__(self, model, selection_fn: Optional[callable] = None, selector_name_match: str = 'gate'):
         self.model = model
         self.wrappers = []
@@ -921,7 +921,7 @@ class MoEProfiler:
                 pass
 
         self._wrap_routers()
-        
+
     def _wrap_routers(self):
         """Find and wrap all MoE routers in the model"""
         # helper to infer number of experts if available on the module
@@ -936,6 +936,7 @@ class MoEProfiler:
             return 8
         for name, module in self.model.named_modules():
             # Skip if already wrapped
+            # This doesn't seem to ever happen
             if isinstance(module, SimpleRouterWrapper):
                 continue
 
@@ -991,25 +992,25 @@ class MoEProfiler:
                     except Exception:
                         # Non-fatal: don't break wrapping if move fails
                         print(f"Warning: failed to move wrapper '{name}' to device {model_device}")
-                    
+
     def start(self):
         """Start profiling"""
         for wrapper in self.wrappers:
             wrapper.enabled = True
             wrapper.reset_metrics()
-    
+
     def stop(self):
         """Stop profiling"""
         for wrapper in self.wrappers:
             wrapper.enabled = False
-    
+
     def get_metrics(self):
         """Get all collected metrics"""
         all_metrics = {}
         for i, wrapper in enumerate(self.wrappers):
             all_metrics[f'layer_{i}'] = wrapper.metrics
         return all_metrics
-    
+
     def save_csv(self, filepath='metrics.csv'):
         """Save metrics to CSV"""
         dfs = []
@@ -1017,7 +1018,7 @@ class MoEProfiler:
             df = wrapper.metrics.to_df()
             df['layer'] = i
             dfs.append(df)
-        
+
         if dfs:
             combined = pd.concat(dfs)
             combined.to_csv(filepath, index=False)
@@ -1047,7 +1048,7 @@ class MoEProfiler:
         except Exception:
             pass
         return info
-    
+
     def print_summary(self):
         """Print comprehensive statistical summary"""
         print("\n" + "="*60)
@@ -1090,7 +1091,7 @@ class MoEProfiler:
                 for k, v in summary.items():
                     if k.startswith('total_'):
                         print(f"    {k:30s}: {v:>12.2f}" if isinstance(v, float) else f"    {k:30s}: {v:>12}")
-                
+
             else:
                 print(f"  {summary}")
 
@@ -1102,63 +1103,63 @@ class MoEProfiler:
 
 class SimpleBenchmark:
     """Run and compare different configurations"""
-    
+
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer
         self.results = {}
-        
+
     def run_config(self, name, input_texts, config_fn=None):
         """Run a single configuration"""
         print(f"\nRunning config: {name}")
-        
+
         # Apply configuration
         if config_fn:
             config_fn(self.model)
-        
+
         # Setup profiler
         profiler = MoEProfiler(self.model)
         profiler.start()
-        
+
         # Run inference
         for text in input_texts:
             inputs = self.tokenizer(text, return_tensors='pt')
             with torch.no_grad():
                 outputs = self.model(**inputs)
-        
+
         # Get results
         profiler.stop()
         metrics = profiler.get_metrics()
-        
+
         # Save
         profiler.save_csv(f"{name}_metrics.csv")
         self.results[name] = metrics
-        
+
         profiler.print_summary()
-        
+
     def compare(self):
         """Compare all configurations"""
         comparison = []
-        
+
         for config_name, metrics in self.results.items():
             total_flops = 0
             total_latency = 0
             total_tokens = 0
-            
+
             for layer_metrics in metrics.values():
                 df = layer_metrics.to_df()
                 if len(df) > 0:
                     total_flops += df['flops'].sum()
                     total_latency += df['latency_ms'].sum()
                     total_tokens += len(df)
-            
+
             comparison.append({
                 'config': config_name,
                 'total_flops': total_flops,
                 'avg_latency_ms': total_latency / total_tokens if total_tokens > 0 else 0,
                 'total_tokens': total_tokens
             })
-        
+
         df = pd.DataFrame(comparison)
         df.to_csv('comparison.csv', index=False)
         print("\n=== Configuration Comparison ===")
@@ -1171,34 +1172,34 @@ class SimpleBenchmark:
 
 class YourRouterMiddleware(torch.nn.Module):
     """Your custom router with confidence-based selection"""
-    
+
     def __init__(self, base_router, confidence_threshold=0.7):
         super().__init__()
         self.router = base_router
         self.confidence_threshold = confidence_threshold
-        
+
     def forward(self, x):
         # Get base routing
         weights, indices = self.router(x)
-        
+
         # Calculate confidence (max weight)
         confidence = weights.max(dim=-1)[0]
-        
+
         # Skip routing if confidence too low
         mask = confidence < self.confidence_threshold
         indices[mask] = -1  # Skip these tokens
-        
+
         # Track semantic confidence (simplified)
         # You can add your actual semantic confidence logic here
         semantic_conf = torch.cosine_similarity(
-            x.mean(dim=1), 
+            x.mean(dim=1),
             x.mean(dim=1).roll(1, dims=0)
         ).mean()
-        
+
         # Store in wrapper if it exists
         if hasattr(self.router, 'metrics'):
             self.router.metrics.semantic_confidence.append(semantic_conf.item())
-        
+
         return weights, indices
 
 # ============================================
@@ -1209,26 +1210,26 @@ def example_usage():
     """
     Complete example of how to use this in your notebook
     """
-    
+
     # Load model
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    
+
     model = AutoModelForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
     tokenizer = AutoTokenizer.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
-    
+
     # Test texts
     test_texts = [
         "What is machine learning?",
         "Explain quantum computing",
         "How does photosynthesis work?"
     ]
-    
+
     # Create benchmark runner
     benchmark = SimpleBenchmark(model, tokenizer)
-    
+
     # Run baseline
     benchmark.run_config("baseline", test_texts)
-    
+
     # Run with your middleware
     def apply_middleware(model):
         for name, module in model.named_modules():
@@ -1238,12 +1239,12 @@ def example_usage():
                 parent = model.get_submodule(parent_name)
                 custom = YourRouterMiddleware(module, confidence_threshold=0.8)
                 setattr(parent, child_name, custom)
-    
+
     benchmark.run_config("with_middleware", test_texts, apply_middleware)
-    
+
     # Compare results
     comparison = benchmark.compare()
-    
+
     print("\nDone! Check these files:")
     print("- baseline_metrics.csv")
     print("- with_middleware_metrics.csv")
@@ -1270,12 +1271,12 @@ def quick_profile(model, tokenizer, text="Hello world", num_iterations=10):
     """One-line profiling for notebooks"""
     profiler = MoEProfiler(model)
     profiler.start()
-    
+
     inputs = tokenizer(text, return_tensors='pt')
     for _ in range(num_iterations):
         with torch.no_grad():
             model(**inputs)
-    
+
     profiler.stop()
     profiler.print_summary()
     profiler.save_csv('quick_profile.csv')
@@ -1286,7 +1287,7 @@ def colab_setup():
     """Setup for Google Colab"""
     # Install dependencies
     print("!pip install transformers torch pandas")
-    
+
     # Check GPU
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
