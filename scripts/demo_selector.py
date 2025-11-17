@@ -162,14 +162,15 @@ def main():
         'entropy': entropy_selector,
         'gap': gap_ratio_selector,
     }
+
+
+    # pass selected_selector into run_toy_model_demo by setting a global variable
     selected_selector = sel_map.get(args.selector.lower(), example_topk_selector)
+    globals()['selected_selector'] = selected_selector
 
     if args.use_hf:
         run_hf_model_demo(args.model_name)
     else:
-        # pass selected_selector into run_toy_model_demo by setting a global variable
-        # simpler: monkeypatch local name used in this module
-        globals()['selected_selector'] = selected_selector
         run_toy_model_demo(use_torch=(torch is not None))
 
 
