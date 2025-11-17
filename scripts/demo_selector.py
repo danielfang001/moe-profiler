@@ -135,8 +135,10 @@ def run_hf_model_demo(model_name: str = "allenai/OLMoE-1B-7B-0924-Instruct"):
 
     text = "Hello world"
     inputs = tokenizer(text, return_tensors='pt')
+    inputs = {k: v for k, v in inputs.items()}
     with torch.no_grad():
-        _ = model(**inputs)
+        out = model.generate(**inputs, max_length=64)
+        print(tokenizer.decode(out[0]))
 
     profiler.stop()
 
