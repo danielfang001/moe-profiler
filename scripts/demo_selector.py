@@ -134,6 +134,9 @@ def run_hf_model_demo(model_name: str = "allenai/OLMoE-1B-7B-0924-Instruct"):
     profiler.start()
 
     text = "Hello world"
+    # Hello world!
+    # This is my first post on my brand new blog. I'm so excited to share my thoughts and experiences with you all.
+    # As a language learner, I've always been fascinated by the power of words. The way they can inspire, motivate, and connect us with others is truly
     inputs = tokenizer(text, return_tensors='pt')
     inputs = {k: v for k, v in inputs.items()}
     with torch.no_grad():
