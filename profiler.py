@@ -1,19 +1,58 @@
 """
-Simple MoE Profiler for Router Middleware Research
-Easy to use, notebook-friendly, minimal complexity
+MoE Profiler for Router Middleware Research
 """
 
 import torch
 import pandas as pd
 import numpy as np
+import math
 import time
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from pathlib import Path
 
-# Centralized log path (can be overridden by environment)
 LOG_PATH = Path(os.environ.get('MOEPROFILER_LOG', '/root/moeprofiler_debug.log'))
+
+
+def _to_numpy(x):
+    """Safely convert a tensor-like or array-like object to a NumPy array.
+
+    Handles PyTorch tensors, objects with `numpy()` or `__array__`, and plain
+    NumPy arrays. Returns `None` if conversion fails.
+    """
+    if x is None:
+        return None
+    try:
+        # PyTorch Tensor path
+        if hasattr(x, 'detach'):
+            y = x.detach()
+            try:
+                y = y.cpu()
+            except Exception:
+                pass
+            if hasattr(y, 'numpy'):
+                return y.numpy()
+            try:
+                return np.asarray(y)
+            except Exception:
+                return None
+
+        # Objects exposing numpy()
+        if hasattr(x, 'numpy'):
+            try:
+                return x.numpy()
+            except Exception:
+                pass
+
+        # Fallback to numpy.asarray for array-like
+        return np.asarray(x)
+    except Exception:
+        try:
+            return np.asarray(x)
+        except Exception:
+            return None
+
 
 # ============================================
 # 1. SIMPLE METRIC TRACKER
@@ -21,7 +60,7 @@ LOG_PATH = Path(os.environ.get('MOEPROFILER_LOG', '/root/moeprofiler_debug.log')
 
 @dataclass
 class Metrics:
-    """Enhanced metrics container with statistical tracking"""
+    """Metrics container with statistical tracking"""
     # Raw measurements
     flops_per_token: List[float] = field(default_factory=list)
     router_flops_per_token: List[float] = field(default_factory=list)
@@ -255,6 +294,509 @@ class SimpleRouterWrapper(torch.nn.Module):
         self.metrics = Metrics()
         self.current_step = 0
 
+
+class SelectableRouterWrapper(torch.nn.Module):
+    """Wrap a router and allow injecting a custom selection function.
+
+    The `selection_fn` should have signature:
+        selection_fn(routing_probs, expert_indices, inputs, router_wrapper) -> (weights, indices) or indices
+
+    - `routing_probs`: tensor [num_tokens, num_experts]
+    - `expert_indices`: original indices (or None) returned by the base router
+    - `inputs`: the original input `x` passed to forward
+    - `router_wrapper`: this wrapper instance (can hold state)
+
+    The function may return:
+      - a tuple `(weights, indices)` (preferred), or
+      - a single `indices` tensor, in which case weights will be taken from `routing_probs`.
+
+    The wrapper preserves the original router return format when possible.
+    """
+
+    def __init__(self, base_router, selection_fn=None, num_experts: int = 8, name: Optional[str] = None):
+        super().__init__()
+        self.base = base_router
+        self.selection_fn = selection_fn
+        self.num_experts = num_experts
+        self.name = name
+
+        # State for inspection/testing
+        self.last_probs = None
+        self.last_indices = None
+        self.last_weights = None
+        # Minimal profiler-compatible state
+        self.metrics = Metrics()
+        self.enabled = True
+        self.current_step = 0
+
+    def forward(self, x):
+        # Handle enabled flag for profiler compatibility
+        if not getattr(self, 'enabled', True):
+            return self.base(x)
+
+        # Increment step counter for profiler compatibility
+        self.current_step = getattr(self, 'current_step', 0) + 1
+
+        # Call original router
+        router_out = self.base(x)
+
+        router_logits = None
+        routing_probs = None
+        orig_weights = None
+        orig_indices = None
+
+        if isinstance(router_out, tuple):
+            orig_weights, orig_indices = router_out
+            # Heuristic: if weights look like logits (outside 0..1), softmax
+            try:
+                if orig_weights.min() < 0 or orig_weights.max() > 1:
+                    routing_probs = torch.nn.functional.softmax(orig_weights, dim=-1)
+                else:
+                    routing_probs = orig_weights
+            except Exception:
+                routing_probs = orig_weights
+        else:
+            router_logits = router_out
+            routing_probs = torch.nn.functional.softmax(router_logits, dim=-1)
+
+        # Store for inspection
+        try:
+            self.last_probs = routing_probs.detach().cpu()
+        except Exception:
+            self.last_probs = None
+
+        # Let selection_fn decide final indices/weights
+        final_weights = orig_weights
+        final_indices = orig_indices
+
+        if self.selection_fn is not None:
+            sel_out = self.selection_fn(routing_probs, orig_indices, x, self)
+            if isinstance(sel_out, tuple) and len(sel_out) >= 2:
+                final_weights, final_indices = sel_out[0], sel_out[1]
+            elif isinstance(sel_out, torch.Tensor):
+                final_indices = sel_out
+                final_weights = routing_probs
+            elif sel_out is None:
+                # keep original
+                pass
+            else:
+                # Unknown return so keep original
+                pass
+
+        # Save last selection
+        try:
+            self.last_indices = final_indices.detach().cpu() if final_indices is not None else None
+            self.last_weights = final_weights.detach().cpu() if final_weights is not None else None
+        except Exception:
+            self.last_indices = None
+            self.last_weights = None
+
+        # Return in same format as base router
+        if isinstance(router_out, tuple):
+            return final_weights, final_indices
+        else:
+            # base returned logits; pass them through unchanged so calling code expecting logits still works
+            return router_logits
+
+    def reset_metrics(self):
+        """Reset profiler-compatible metrics and step counter."""
+        self.metrics = Metrics()
+        self.current_step = 0
+
+
+def attach_selector_to_model(model, selection_fn, name_match: str = 'gate'):
+    """Find modules with `name_match` in their module path and replace them with SelectableRouterWrapper.
+
+    Returns a list of wrappers created.
+    """
+    wrappers = []
+    for name, module in list(model.named_modules()):
+        # skip top-level model entry (named_modules yields parent too); we want leaf modules
+        if name == '':
+            continue
+        if name_match.lower() in name.lower():
+            # Skip if already wrapped
+            if isinstance(module, SelectableRouterWrapper):
+                continue
+
+            print(f"Attaching selector wrapper to: {name} (type: {type(module).__name__})")
+            wrapper = SelectableRouterWrapper(module, selection_fn=selection_fn, name=name)
+            # set on parent
+            parent_name = '.'.join(name.split('.')[:-1])
+            child_name = name.split('.')[-1]
+            if parent_name:
+                parent = model.get_submodule(parent_name)
+            else:
+                parent = model
+            setattr(parent, child_name, wrapper)
+            # move to same device as model parameters if possible
+            try:
+                model_device = next(model.parameters()).device
+                wrapper.to(model_device)
+            except Exception:
+                pass
+            wrappers.append(wrapper)
+    return wrappers
+
+
+def example_topk_selector(routing_probs, orig_indices, x, router_wrapper, k: int = 8, threshold: float = 0.0):
+    """Example selection function: pick top-k per token, optionally threshold low-confidence tokens by setting indices to -1.
+
+    Returns (weights, indices) where weights are topk probs and indices are topk indices.
+    """
+    # routing_probs: [num_tokens, num_experts]
+    if routing_probs is None:
+        return None
+
+    # Support both torch tensors and numpy arrays/shims
+    if hasattr(routing_probs, 'detach'):
+        vals, idx = torch.topk(routing_probs, k, dim=-1)
+        if threshold is not None and threshold > 0.0:
+            low_conf_mask = vals[:, 0] < threshold
+            if low_conf_mask.any():
+                idx[low_conf_mask, :] = -1
+                vals[low_conf_mask, :] = 0.0
+        return vals, idx
+    else:
+        # numpy path: routing_probs is array-like
+        arr = routing_probs.numpy() if hasattr(routing_probs, 'numpy') else np.asarray(routing_probs)
+        idx = np.argsort(-arr, axis=1)[:, :k]
+        vals = np.take_along_axis(arr, idx, axis=1)
+        if threshold is not None and threshold > 0.0:
+            low_conf_mask = vals[:, 0] < threshold
+            if low_conf_mask.any():
+                idx[low_conf_mask, :] = -1
+                vals[low_conf_mask, :] = 0.0
+        return vals, idx
+
+
+def kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int = 8):
+    """Select k per token using a kneedle elbow detection on sorted probabilities.
+
+    For each token:
+      - Sort probabilities descending
+      - Normalize index x in [0,1] and probs y in [0,1]
+      - Compute distance from point (x,y) to the line y = 1 - x (diagonal from (0,1) to (1,0))
+      - Choose the index with maximum positive distance as the elbow (k = idx+1)
+      - Cap k by `k_max` and at least 1
+
+    Returns (vals, idx) where idx shape is [num_tokens, k] and vals are the corresponding probs.
+    """
+    if routing_probs is None:
+        return None
+
+    # routing_probs may be torch tensor or numpy-like shim
+    is_torch = hasattr(routing_probs, 'detach') and not isinstance(routing_probs, (list, tuple))
+
+    if is_torch:
+        probs = routing_probs.detach()
+        device = probs.device
+        probs_sorted, indices_sorted = torch.sort(probs, descending=True, dim=-1)
+        n_experts = probs_sorted.size(-1)
+
+        # normalize x and y
+        x = torch.linspace(0, 1, steps=n_experts, device=device).unsqueeze(0).expand(probs_sorted.size(0), -1)
+        # normalize y to [0,1] by dividing by max per row (first element since sorted desc)
+        y = probs_sorted / (probs_sorted[:, :1] + 1e-12)
+
+        # diagonal line y = 1 - x
+        diag = 1.0 - x
+        # distance (signed) from point to diagonal (positive means above diagonal)
+        dist = (y - diag) / math.sqrt(2.0)
+
+        # For each token, find index of max distance
+        max_vals, max_idx = torch.max(dist, dim=1)
+        ks = (max_idx + 1).clamp(min=1)
+        ks = torch.clamp(ks, max=k_max)
+
+        # Build final indices & vals per token
+        final_idxs = []
+        final_vals = []
+        for i in range(probs_sorted.size(0)):
+            k = int(ks[i].item())
+            idxs = indices_sorted[i, :k]
+            vals = probs_sorted[i, :k]
+            # pad to k_max
+            if k < k_max:
+                pad = k_max - k
+                idxs = torch.cat([idxs, torch.full((pad,), -1, dtype=idxs.dtype, device=device)])
+                vals = torch.cat([vals, torch.zeros((pad,), dtype=vals.dtype, device=device)])
+            final_idxs.append(idxs)
+            final_vals.append(vals)
+
+        final_idxs = torch.stack(final_idxs, dim=0)
+        final_vals = torch.stack(final_vals, dim=0)
+        return final_vals, final_idxs
+
+    else:
+        # numpy shim
+        arr = _to_numpy(routing_probs)
+        n_tokens, n_experts = arr.shape
+        idxs_out = []
+        vals_out = []
+        for i in range(n_tokens):
+            row = arr[i]
+            sidx = np.argsort(-row)
+            svals = row[sidx]
+            xs = np.linspace(0, 1, n_experts)
+            ys = svals / (svals[0] + 1e-12)
+            diag = 1.0 - xs
+            dist = (ys - diag) / math.sqrt(2.0)
+            max_idx = int(np.argmax(dist))
+            k = max(1, min(k_max, max_idx + 1))
+            sel_idx = sidx[:k].tolist()
+            sel_vals = svals[:k].tolist()
+            # pad
+            if k < k_max:
+                sel_idx += [-1] * (k_max - k)
+                sel_vals += [0.0] * (k_max - k)
+            idxs_out.append(sel_idx)
+            vals_out.append(sel_vals)
+        return np.array(vals_out), np.array(idxs_out)
+
+
+def cumsum_selector(routing_probs, orig_indices, x, router_wrapper, mass_threshold: float = 0.9, k_max: int = 8):
+    """Select minimum k per token so cumulative mass >= mass_threshold (cap at k_max)."""
+    if routing_probs is None:
+        return None
+    if hasattr(routing_probs, 'detach'):
+        probs = routing_probs.detach()
+        probs_sorted, indices_sorted = torch.sort(probs, descending=True, dim=-1)
+        cums = torch.cumsum(probs_sorted, dim=-1)
+        ks = (cums >= mass_threshold).float().argmax(dim=-1) + 1
+        ks = torch.clamp(ks, min=1, max=k_max)
+        final_idxs = []
+        final_vals = []
+        for i in range(probs_sorted.size(0)):
+            k = int(ks[i].item())
+            idxs = indices_sorted[i, :k]
+            vals = probs_sorted[i, :k]
+            if k < k_max:
+                pad = k_max - k
+                idxs = torch.cat([idxs, torch.full((pad,), -1, dtype=idxs.dtype, device=idxs.device)])
+                vals = torch.cat([vals, torch.zeros((pad,), dtype=vals.dtype, device=vals.device)])
+            final_idxs.append(idxs)
+            final_vals.append(vals)
+        return torch.stack(final_vals, dim=0), torch.stack(final_idxs, dim=0)
+    else:
+        arr = _to_numpy(routing_probs)
+        n_tokens, n_experts = arr.shape
+        idxs_out = []
+        vals_out = []
+        for i in range(n_tokens):
+            row = arr[i]
+            sidx = np.argsort(-row)
+            svals = row[sidx]
+            cums = np.cumsum(svals)
+            k = int(np.searchsorted(cums, mass_threshold) + 1)
+            k = max(1, min(k_max, k))
+            sel_idx = sidx[:k].tolist()
+            sel_vals = svals[:k].tolist()
+            if k < k_max:
+                sel_idx += [-1] * (k_max - k)
+                sel_vals += [0.0] * (k_max - k)
+            idxs_out.append(sel_idx)
+            vals_out.append(sel_vals)
+        return np.array(vals_out), np.array(idxs_out)
+
+
+def entropy_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int = 8):
+    """Select k based on entropy: effective_k = ceil(exp(entropy)), capped at k_max."""
+    if routing_probs is None:
+        return None
+    if hasattr(routing_probs, 'detach'):
+        probs = routing_probs.detach()
+        eps = 1e-12
+        ent = -torch.sum(probs * torch.log(probs + eps), dim=-1)
+        eff_k = torch.ceil(torch.exp(ent)).long()
+        eff_k = torch.clamp(eff_k, min=1, max=k_max)
+        probs_sorted, indices_sorted = torch.sort(probs, descending=True, dim=-1)
+        final_idxs = []
+        final_vals = []
+        for i in range(probs_sorted.size(0)):
+            k = int(eff_k[i].item())
+            idxs = indices_sorted[i, :k]
+            vals = probs_sorted[i, :k]
+            if k < k_max:
+                pad = k_max - k
+                idxs = torch.cat([idxs, torch.full((pad,), -1, dtype=idxs.dtype, device=idxs.device)])
+                vals = torch.cat([vals, torch.zeros((pad,), dtype=vals.dtype, device=vals.device)])
+            final_idxs.append(idxs)
+            final_vals.append(vals)
+        return torch.stack(final_vals, dim=0), torch.stack(final_idxs, dim=0)
+    else:
+        arr = _to_numpy(routing_probs)
+        n_tokens, n_experts = arr.shape
+        idxs_out = []
+        vals_out = []
+        for i in range(n_tokens):
+            row = arr[i]
+            eps = 1e-12
+            ent = -np.sum(row * np.log(row + eps))
+            k = int(np.ceil(np.exp(ent)))
+            k = max(1, min(k_max, k))
+            sidx = np.argsort(-row)
+            svals = row[sidx]
+            sel_idx = sidx[:k].tolist()
+            sel_vals = svals[:k].tolist()
+            if k < k_max:
+                sel_idx += [-1] * (k_max - k)
+                sel_vals += [0.0] * (k_max - k)
+            idxs_out.append(sel_idx)
+            vals_out.append(sel_vals)
+        return np.array(vals_out), np.array(idxs_out)
+
+
+def gap_ratio_selector(routing_probs, orig_indices, x, router_wrapper, ratio_threshold: float = 2.0, k_max: int = 8):
+    """Select k where the ratio p_k / p_{k+1} exceeds ratio_threshold (cap at k_max).
+
+    If no gap exceeds threshold, fall back to min(k_max, top-1..k) or top-1.
+    """
+    if routing_probs is None:
+        return None
+    if hasattr(routing_probs, 'detach'):
+        probs = routing_probs.detach()
+        probs_sorted, indices_sorted = torch.sort(probs, descending=True, dim=-1)
+        n_experts = probs_sorted.size(-1)
+        final_idxs = []
+        final_vals = []
+        for i in range(probs_sorted.size(0)):
+            row = probs_sorted[i]
+            k = 1
+            for j in range(n_experts - 1):
+                p_k = float(row[j].item())
+                p_k1 = float(row[j+1].item())
+                if p_k1 <= 0:
+                    continue
+                if (p_k / p_k1) >= ratio_threshold:
+                    k = j + 1
+                    break
+            k = max(1, min(k, k_max))
+            idxs = indices_sorted[i, :k]
+            vals = probs_sorted[i, :k]
+            if k < k_max:
+                pad = k_max - k
+                idxs = torch.cat([idxs, torch.full((pad,), -1, dtype=idxs.dtype, device=idxs.device)])
+                vals = torch.cat([vals, torch.zeros((pad,), dtype=vals.dtype, device=vals.device)])
+            final_idxs.append(idxs)
+            final_vals.append(vals)
+        return torch.stack(final_vals, dim=0), torch.stack(final_idxs, dim=0)
+    else:
+        arr = _to_numpy(routing_probs)
+        n_tokens, n_experts = arr.shape
+        idxs_out = []
+        vals_out = []
+        for i in range(n_tokens):
+            row = np.sort(arr[i])[::-1]
+            sidx = np.argsort(-arr[i])
+            k = 1
+            for j in range(n_experts - 1):
+                p_k = row[j]
+                p_k1 = row[j+1]
+                if p_k1 <= 0:
+                    continue
+                if (p_k / p_k1) >= ratio_threshold:
+                    k = j + 1
+                    break
+            k = max(1, min(k, k_max))
+            sel_idx = sidx[:k].tolist()
+            sel_vals = arr[i][sel_idx].tolist()
+            if k < k_max:
+                sel_idx += [-1] * (k_max - k)
+                sel_vals += [0.0] * (k_max - k)
+            idxs_out.append(sel_idx)
+            vals_out.append(sel_vals)
+        return np.array(vals_out), np.array(idxs_out)
+
+
+def run_selector_demo():
+    """Lightweight demo using a DummyRouter to verify selection wrapper behavior.
+
+    Prints last_probs and last_indices for inspection.
+    """
+    class DummyRouter(torch.nn.Module):
+        def __init__(self, num_experts=16):
+            super().__init__()
+            self.num_experts = num_experts
+
+        def forward(self, x):
+            # Create deterministic logits from input mean to aid testing
+            batch = x.shape[0]
+            seq = x.shape[1] if x.dim() > 2 else 1
+            num_tokens = batch * seq
+            # logits shaped [num_tokens, num_experts]
+            logits = torch.randn(num_tokens, self.num_experts)
+            return logits
+
+    # Create dummy input
+    x = torch.randn(2, 3, 16)  # batch=2, seq=3, hidden=16
+
+    base = DummyRouter(num_experts=16)
+    wrapper = SelectableRouterWrapper(base, selection_fn=lambda p, i, x, r: example_topk_selector(p, i, x, r, k=4, threshold=0.0), num_experts=16, name='demo.gate')
+    out = wrapper(x)
+    print("Wrapper returned (base-logs):", isinstance(out, torch.Tensor))
+    print("Last probs shape:", None if wrapper.last_probs is None else wrapper.last_probs.shape)
+    print("Last indices shape:", None if wrapper.last_indices is None else wrapper.last_indices.shape)
+    print("Example last indices (first tokens):\n", wrapper.last_indices[:4])
+
+
+def run_selector_demo_no_torch():
+    """Fallback demo that does not require PyTorch — uses NumPy only.
+
+    This simulates routing probabilities and runs the example_topk_selector
+    to show how indices/weights would be selected.
+    """
+    import numpy as _np
+
+    num_experts = 16
+    batch = 2
+    seq = 3
+    num_tokens = batch * seq
+
+    # Simulate routing_probs as softmaxed random logits
+    rng = _np.random.RandomState(0)
+    logits = rng.randn(num_tokens, num_experts).astype(_np.float32)
+    exp = _np.exp(logits - _np.max(logits, axis=1, keepdims=True))
+    probs = exp / _np.sum(exp, axis=1, keepdims=True)
+
+    # Convert to a minimal stand-in that our selector expects (numpy -> torch-like tensor)
+    # We'll adapt example_topk_selector which expects a tensor; create a tiny shim
+    class Shim:
+        def __init__(self, arr):
+            self._arr = arr
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return self._arr
+
+        def __array__(self):
+            return self._arr
+
+    shim_probs = Shim(probs)
+
+    # Adapted selector using numpy directly
+    def numpy_topk_selector(shim_probs, orig_indices, x, router_wrapper, k: int = 8, threshold: float = 0.0):
+        arr = shim_probs.numpy()
+        idx = _np.argsort(-arr, axis=1)[:, :k]
+        vals = _np.take_along_axis(arr, idx, axis=1)
+        if threshold is not None and threshold > 0.0:
+            low_conf = vals[:, 0] < threshold
+            if low_conf.any():
+                idx[low_conf, :] = -1
+                vals[low_conf, :] = 0.0
+        return vals, idx
+
+    vals, idx = numpy_topk_selector(shim_probs, None, None, None, k=4, threshold=0.0)
+    print("Simulated routing_probs shape:", probs.shape)
+    print("Top-4 indices shape:", idx.shape)
+    print("Example top-4 indices (first 4 tokens):\n", idx[:4])
+    print("Example top-4 weights (first 4 tokens):\n", vals[:4])
+
     def _calculate_gini_coefficient(self, values):
         """
         Calculate Gini coefficient for load imbalance
@@ -359,9 +901,13 @@ class SimpleRouterWrapper(torch.nn.Module):
 class MoEProfiler:
     """Simple profiler for experiments"""
     
-    def __init__(self, model):
+    def __init__(self, model, selection_fn: Optional[callable] = None, selector_name_match: str = 'gate'):
         self.model = model
         self.wrappers = []
+        # Optional selector to inject custom expert-selection logic
+        # If provided, profiler will replace matched router modules with SelectableRouterWrapper
+        self.selection_fn = selection_fn
+        self.selector_name_match = selector_name_match
         # Ensure log file exists (best-effort) so we can diagnose missing logs
         try:
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -378,6 +924,16 @@ class MoEProfiler:
         
     def _wrap_routers(self):
         """Find and wrap all MoE routers in the model"""
+        # helper to infer number of experts if available on the module
+        def _infer(module):
+            for attr in ('num_experts', 'n_experts', 'num_expert', 'n_expert', 'n'):
+                try:
+                    val = getattr(module, attr)
+                    if isinstance(val, int) and val > 0:
+                        return val
+                except Exception:
+                    continue
+            return 8
         for name, module in self.model.named_modules():
             # Skip if already wrapped
             if isinstance(module, SimpleRouterWrapper):
@@ -397,8 +953,15 @@ class MoEProfiler:
 
             if is_gate_or_router:
                 print(f"Wrapping router: {name} (type: {module_type})")
-                # Replace with wrapper and record the original module name
-                wrapper = SimpleRouterWrapper(module, name=name)
+                # Determine number of experts (best-effort)
+                num_experts = _infer(module)
+
+                # Replace with SelectableRouterWrapper if a selection function was provided,
+                # otherwise fall back to the original SimpleRouterWrapper
+                if self.selection_fn is not None:
+                    wrapper = SelectableRouterWrapper(module, selection_fn=self.selection_fn, num_experts=num_experts, name=name)
+                else:
+                    wrapper = SimpleRouterWrapper(module, num_experts=num_experts, name=name)
                 self.wrappers.append(wrapper)
 
                 # Determine parent module and child attribute name and set the wrapper
