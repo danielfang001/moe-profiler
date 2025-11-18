@@ -1297,3 +1297,4 @@ def colab_setup():
 
 if __name__ == "__main__":
     print("MoE Profiler loaded! Use example_usage() to see how it works.")
+
