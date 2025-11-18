@@ -205,8 +205,33 @@ class RouterWrapper(nn.Module):
         # Collect metrics
         self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
 
-        # Manually route to experts
-        final_hidden_states = self.experts(hidden_flat, expert_indices, routing_weights)
+        # Manually route to experts (similar to OlmoeSparseMoeBlock)
+        num_tokens = hidden_flat.shape[0]
+        final_hidden_states = torch.zeros(
+            (num_tokens, hidden_dim),
+            dtype=hidden_flat.dtype,
+            device=hidden_flat.device
+        )
+
+        # Route each token to its selected experts
+        for expert_idx in range(self.num_experts):
+            # Find which tokens are routed to this expert
+            expert_mask = (expert_indices == expert_idx)
+            token_positions, k_indices = torch.where(expert_mask)
+
+            if len(token_positions) == 0:
+                continue  # No tokens for this expert
+
+            # Get the tokens and their routing weights
+            expert_input = hidden_flat[token_positions]
+            expert_weights = routing_weights[token_positions, k_indices]
+
+            # Call the expert
+            expert_output = self.experts[expert_idx](expert_input)
+
+            # Apply routing weights and accumulate
+            weighted_output = expert_output * expert_weights[:, None]
+            final_hidden_states.index_add_(0, token_positions, weighted_output.to(hidden_flat.dtype))
 
         # Reshape back
         output = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
