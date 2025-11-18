@@ -137,8 +137,9 @@ class OLMoEHandler(BaseArchitectureHandler):
         routing_probs = torch.nn.functional.softmax(router_logits, dim=-1, dtype=torch.float)
 
         # Select top-k
+        top_k = self.get_default_top_k()  # Use getter to get config value
         routing_weights, expert_indices = torch.topk(
-            routing_probs, self.default_top_k, dim=-1
+            routing_probs, top_k, dim=-1
         )
 
         # Renormalize (OLMoE does this)
@@ -163,7 +164,7 @@ class OLMoEHandler(BaseArchitectureHandler):
         entropy = -(weights * torch.log(weights + 1e-10)).sum(dim=-1).mean()
 
         # Normalize by max entropy for top-k
-        max_entropy = torch.log(torch.tensor(float(self.default_top_k)))
+        max_entropy = torch.log(torch.tensor(float(self.get_default_top_k())))
         confidence = float(1.0 - (entropy / max_entropy).item())
 
         return confidence

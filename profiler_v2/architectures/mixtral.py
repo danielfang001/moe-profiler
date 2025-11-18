@@ -113,8 +113,9 @@ class MixtralHandler(BaseArchitectureHandler):
         routing_probs = torch.nn.functional.softmax(router_logits, dim=-1)
 
         # Select top-k experts
+        top_k = self.get_default_top_k()  # Use getter to get config value
         routing_weights, expert_indices = torch.topk(
-            routing_probs, self.default_top_k, dim=-1
+            routing_probs, top_k, dim=-1
         )
 
         return routing_weights, expert_indices
@@ -140,7 +141,7 @@ class MixtralHandler(BaseArchitectureHandler):
 
         # Normalize entropy to [0, 1] range
         # Max entropy = log(num_experts)
-        max_entropy = torch.log(torch.tensor(float(self.num_experts)))
+        max_entropy = torch.log(torch.tensor(float(self.get_num_experts())))
         confidence = float(1.0 - (entropy / max_entropy).item())
 
         return confidence
