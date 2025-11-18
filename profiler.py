@@ -254,7 +254,7 @@ class SimpleRouterWrapper(torch.nn.Module):
                         5 * num_tokens * self.num_experts)
 
         # Expert FLOPs: Accounts for dynamic k per token
-        # Each expert is a 2-layer FFN: hidden -> expert_dim -> hidden
+        # TODO: check this. Each expert is a 2-layer FFN: hidden -> expert_dim -> hidden (Mixtral)
         # up_proj: 2 * hidden_dim * expert_dim
         # down_proj: 2 * expert_dim * hidden_dim
         # Sum across all tokens with their respective k values
@@ -943,14 +943,17 @@ class MoEProfiler:
             # Check module type names for MoE-specific classes
             module_type = type(module).__name__
 
-            # Match only gate/router modules (not the entire MoE block)
-            # - Mixtral: 'gate' in 'block_sparse_moe.gate'
-            # - OLMoE: 'gate' in 'mlp.gate' (Linear module inside OlmoeSparseMoeBlock)
+            # Match MoE routing modules:
+            # - Mixtral: wrap 'block_sparse_moe.gate' (returns logits)
+            # - OLMoE: wrap entire 'mlp' block (OlmoeSparseMoeBlock) to intercept expert selection
             # - General: 'router' in name
-            is_gate_or_router = (
-                ('router' in name.lower() and 'gate_proj' not in name.lower()) or
-                (name.endswith('.gate') and 'gate_proj' not in name.lower())
-            )
+
+            is_moe_block = 'SparseMoe' in module_type and 'Block' in module_type
+            is_gate = (name.endswith('.gate') and 'gate_proj' not in name.lower() and
+                      'block_sparse_moe' in name.lower())
+            is_router = 'router' in name.lower() and 'gate_proj' not in name.lower()
+
+            is_gate_or_router = is_moe_block or is_gate or is_router
 
             if is_gate_or_router:
                 print(f"Wrapping router: {name} (type: {module_type})")
