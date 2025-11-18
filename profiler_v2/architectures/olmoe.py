@@ -181,8 +181,8 @@ class OLMoEHandler(BaseArchitectureHandler):
         """Return all OLMoE specifications."""
         return {
             'architecture': 'olmoe',
-            'num_experts': self.num_experts,
-            'default_top_k': self.default_top_k,
+            'num_experts': self.get_num_experts(),  # Use getter to get config value
+            'default_top_k': self.get_default_top_k(),  # Use getter
             'wrapper_type': 'block',
             'gate_output_format': 'logits',
             'hidden_dim_default': self.hidden_dim_default,

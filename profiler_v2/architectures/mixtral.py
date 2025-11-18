@@ -153,10 +153,11 @@ class MixtralHandler(BaseArchitectureHandler):
         """Return all Mixtral specifications."""
         return {
             'architecture': 'mixtral',
-            'num_experts': self.num_experts,
-            'default_top_k': self.default_top_k,
+            'num_experts': self.get_num_experts(),  # Use getter to get config value
+            'default_top_k': self.get_default_top_k(),  # Use getter
             'wrapper_type': 'gate',
             'gate_output_format': 'logits',
             'hidden_dim_default': self.hidden_dim_default,
+            'expert_dim_default': self.expert_dim_default,
             'expert_dim_multiplier': self.expert_dim_multiplier,
         }
