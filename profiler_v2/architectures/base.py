@@ -7,6 +7,7 @@ Defines the interface that all architecture-specific handlers must implement.
 from abc import ABC, abstractmethod
 from typing import Tuple, Dict, Any, Optional
 import torch.nn as nn
+import torch
 
 
 class BaseArchitectureHandler(ABC):
