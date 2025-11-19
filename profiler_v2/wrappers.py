@@ -179,6 +179,10 @@ class RouterWrapper(nn.Module):
         3. Manually route to experts
         4. Return aggregated output
         """
+        # If no custom selector, use original model routing for correctness
+        if self.selection_fn is None:
+            return self.wrapped_module(hidden_states, *args, **kwargs)
+
         # Get routing logits from gate
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_flat = hidden_states.view(-1, hidden_dim)
