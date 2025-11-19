@@ -179,10 +179,6 @@ class RouterWrapper(nn.Module):
         3. Manually route to experts
         4. Return aggregated output
         """
-        # If no custom selector, use original model routing for correctness
-        if self.selection_fn is None:
-            return self.wrapped_module(hidden_states, *args, **kwargs)
-
         # Get routing logits from gate
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_flat = hidden_states.view(-1, hidden_dim)
@@ -192,19 +188,25 @@ class RouterWrapper(nn.Module):
         # Parse logits to get routing decision
         routing_weights, expert_indices = self.handler.parse_router_output(gate_logits)
 
-        # Apply custom selection if provided
-        if self.selection_fn is not None:
-            try:
-                routing_probs = torch.nn.functional.softmax(gate_logits, dim=-1)
-                custom_weights, custom_indices = self.selection_fn(
-                    routing_probs, expert_indices, hidden_flat, self
-                )
+        # If no custom selector, use original model routing but still collect metrics
+        if self.selection_fn is None:
+            # Collect metrics for baseline
+            self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
+            # Use original routing
+            return self.wrapped_module(hidden_states, *args, **kwargs)
 
-                if custom_weights is not None and custom_indices is not None:
-                    routing_weights = custom_weights
-                    expert_indices = custom_indices
-            except Exception as e:
-                print(f"Warning: Custom selector failed: {e}. Using default routing.")
+        # Apply custom selection (we know selection_fn is not None here)
+        try:
+            routing_probs = torch.nn.functional.softmax(gate_logits, dim=-1)
+            custom_weights, custom_indices = self.selection_fn(
+                routing_probs, expert_indices, hidden_flat, self
+            )
+
+            if custom_weights is not None and custom_indices is not None:
+                routing_weights = custom_weights
+                expert_indices = custom_indices
+        except Exception as e:
+            print(f"Warning: Custom selector failed: {e}. Using default routing.")
 
         # Collect metrics
         self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
