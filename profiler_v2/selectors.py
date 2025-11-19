@@ -107,6 +107,7 @@ def kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int 
             # pad to k_max
             if k < k_max:
                 pad = k_max - k
+                # to resolve expected sequence of equal length, need padding
                 idxs = torch.cat([idxs, torch.full((pad,), -1, dtype=idxs.dtype, device=device)])
                 vals = torch.cat([vals, torch.zeros((pad,), dtype=vals.dtype, device=device)])
             final_idxs.append(idxs)

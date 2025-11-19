@@ -121,7 +121,7 @@ class MoEBenchmark:
             'summary': summary,
             'k_stats': k_stats,
             'num_prompts': len(test_prompts),
-            'selection_fn': selection_fn.__name__ if selection_fn else 'baseline',
+            'selection_fn': name,  # Just use the config name provided by user
             'outputs': all_outputs
         }
 
