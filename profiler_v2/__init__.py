@@ -39,6 +39,7 @@ from .profiler import MOEProfiler
 from .metrics import Metrics, get_metrics_summary
 from .wrappers import RouterWrapper
 from .benchmark import MoEBenchmark, quick_benchmark
+from .accuracy_benchmark import AccuracyBenchmark, quick_accuracy_test
 from . import selectors
 from . import architectures
 
@@ -51,6 +52,8 @@ __all__ = [
     "get_metrics_summary",
     "MoEBenchmark",
     "quick_benchmark",
+    "AccuracyBenchmark",
+    "quick_accuracy_test",
     "selectors",
     "architectures",
 ]
