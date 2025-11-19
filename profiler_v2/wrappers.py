@@ -235,8 +235,9 @@ class RouterWrapper(nn.Module):
 
         # Reshape back
         output = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        router_logits = gate_logits.view(batch_size, sequence_length, -1)
 
-        return output
+        return output, router_logits
 
     def _collect_metrics(
         self,
