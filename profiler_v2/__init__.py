@@ -38,6 +38,7 @@ With Custom Selection:
 from .profiler import MOEProfiler
 from .metrics import Metrics, get_metrics_summary
 from .wrappers import RouterWrapper
+from .benchmark import MoEBenchmark, quick_benchmark
 from . import selectors
 from . import architectures
 
@@ -48,6 +49,8 @@ __all__ = [
     "Metrics",
     "RouterWrapper",
     "get_metrics_summary",
+    "MoEBenchmark",
+    "quick_benchmark",
     "selectors",
     "architectures",
 ]

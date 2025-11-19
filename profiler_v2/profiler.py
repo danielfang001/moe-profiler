@@ -549,3 +549,35 @@ class MOEProfiler:
             print(f"\nFirst 20 k-values: {k_stats['k_values'][:20]}")
 
         print("\n" + "=" * 80)
+
+    def set_selection_fn(self, selection_fn: Callable):
+        """
+        Apply a selection function to all existing wrappers.
+
+        Use this to switch selection strategies after the profiler has been created.
+
+        Args:
+            selection_fn: Selection function to apply (e.g., kneedle_selector)
+
+        Example:
+            >>> from profiler_v2.selectors import kneedle_selector
+            >>> profiler.set_selection_fn(kneedle_selector)
+        """
+        for wrapper in self.wrappers:
+            wrapper.selection_fn = selection_fn
+        self.selection_fn = selection_fn
+        print(f"Applied selection function to {len(self.wrappers)} wrappers")
+
+    def remove_selection_fn(self):
+        """
+        Remove selection function from all wrappers (revert to default routing).
+
+        Use this to test baseline routing behavior.
+
+        Example:
+            >>> profiler.remove_selection_fn()
+        """
+        for wrapper in self.wrappers:
+            wrapper.selection_fn = None
+        self.selection_fn = None
+        print(f"Removed selection function from {len(self.wrappers)} wrappers")
