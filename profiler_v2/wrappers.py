@@ -98,9 +98,8 @@ class RouterWrapper(nn.Module):
 
         self.current_step += 1
 
-        # Skip warmup and sampling
-        in_warmup = self.current_step <= self.warmup_steps
-        should_profile = (self.current_step % self.sampling_rate == 0) and not in_warmup
+        # Skip sampling (removed warmup mechanism for evaluation)
+        should_profile = (self.current_step % self.sampling_rate == 0)
 
         if not should_profile:
             return self.wrapped_module(hidden_states, *args, **kwargs)
