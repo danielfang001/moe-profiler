@@ -76,7 +76,8 @@ class AccuracyBenchmark:
         name: str = "arc_easy",
         split: str = "test",
         num_samples: Optional[int] = None,
-        mmlu_mode: str = "quick"
+        mmlu_mode: Optional[str] = None,
+        random_seed: int = 42
     ):
         """
         Load a benchmark dataset.
@@ -89,11 +90,13 @@ class AccuracyBenchmark:
                 - "hellaswag": HellaSwag
                 - "piqa": PIQA
             split: Dataset split ("test", "validation", etc.)
-            num_samples: Limit to N samples (for quick testing, overrides mmlu_mode)
+            num_samples: Limit to N samples (random sampling with fixed seed)
             mmlu_mode: For MMLU only, choose test scope:
                 - "quick": 3 subjects (~300-400 questions)
                 - "medium": 10 subjects (~1,500 questions)
                 - "full": All 57 subjects (~14,000 questions)
+                - None: If num_samples specified, uses "full" and random samples
+            random_seed: Random seed for reproducible sampling (default: 42)
 
         Returns:
             List of evaluation examples
@@ -105,6 +108,13 @@ class AccuracyBenchmark:
         elif name == "arc_challenge":
             dataset = load_dataset("allenai/ai2_arc", "ARC-Challenge", split=split)
         elif name == "mmlu":
+            # If num_samples specified without mode, default to "full" for random sampling
+            if mmlu_mode is None and num_samples is not None:
+                mmlu_mode = "full"
+                print(f"  num_samples specified without mmlu_mode, defaulting to 'full' for random sampling")
+            elif mmlu_mode is None:
+                mmlu_mode = "quick"  # Default to quick if nothing specified
+
             # Select subjects based on mode
             if mmlu_mode == "quick":
                 subjects = MMLU_QUICK
@@ -134,10 +144,16 @@ class AccuracyBenchmark:
         else:
             raise ValueError(f"Unknown benchmark: {name}")
 
-        # Limit samples if requested (overrides mmlu_mode)
+        # Limit samples if requested with random sampling
         if num_samples is not None:
-            dataset = dataset.select(range(min(num_samples, len(dataset))))
-            print(f"  Limited to {len(dataset)} examples")
+            num_samples = min(num_samples, len(dataset))
+            # Random sampling with fixed seed for reproducibility
+            import random
+            random.seed(random_seed)
+            indices = random.sample(range(len(dataset)), num_samples)
+            indices.sort()  # Sort to maintain some order
+            dataset = dataset.select(indices)
+            print(f"  Randomly sampled {len(dataset)} examples (seed={random_seed})")
 
         print(f"Final dataset size: {len(dataset)} examples")
         return dataset
@@ -456,6 +472,8 @@ class AccuracyBenchmark:
             for wrapper in self.profiler.wrappers:
                 # Get routing data for this question
                 k_per_token = wrapper.metrics.k_per_token.copy()
+                flops_per_token = wrapper.metrics.flops_per_token.copy()
+                latency_ms = wrapper.metrics.latency_ms.copy()
 
                 # Compute entropy per token if we have logits
                 router_entropy = []
@@ -473,6 +491,10 @@ class AccuracyBenchmark:
                     'expert_load': dict(wrapper.metrics.expert_loads),  # How many times each expert used
                     'router_entropy': router_entropy,
                     'mean_entropy': float(sum(router_entropy) / len(router_entropy)) if router_entropy else 0,
+                    'flops_per_token': flops_per_token,
+                    'mean_flops': float(sum(flops_per_token) / len(flops_per_token)) if flops_per_token else 0,
+                    'latency_ms': latency_ms,
+                    'mean_latency_ms': float(sum(latency_ms) / len(latency_ms)) if latency_ms else 0,
                 }
 
                 # Save logits if enabled
@@ -517,9 +539,34 @@ class AccuracyBenchmark:
         # Compute summary statistics
         accuracy = 100 * sum(1 for q in questions_data if q['correct']) / len(questions_data)
 
-        # Get profiler metrics
-        k_stats = self.profiler.get_k_statistics()
-        summary = self.profiler.get_summary()
+        # Compute k_stats from per-question data (not from profiler, since we reset per question)
+        all_avg_k = [q['avg_k_all_layers'] for q in questions_data if q['avg_k_all_layers'] > 0]
+        all_max_k = [q['max_k_all_layers'] for q in questions_data if q['max_k_all_layers'] > 0]
+        all_min_k = [q['min_k_all_layers'] for q in questions_data if q['min_k_all_layers'] > 0]
+
+        k_stats = {
+            'k_mean': float(sum(all_avg_k) / len(all_avg_k)) if all_avg_k else 0,
+            'k_std': float(torch.tensor(all_avg_k).std()) if len(all_avg_k) > 1 else 0,
+            'k_min': float(min(all_min_k)) if all_min_k else 0,
+            'k_max': float(max(all_max_k)) if all_max_k else 0,
+        }
+
+        # Compute summary stats from per-question data (not from profiler, since we reset per question)
+        all_flops = []
+        all_latency = []
+        for q in questions_data:
+            for layer_data in q['layers'].values():
+                if layer_data['mean_flops'] > 0:
+                    all_flops.append(layer_data['mean_flops'])
+                if layer_data['mean_latency_ms'] > 0:
+                    all_latency.append(layer_data['mean_latency_ms'])
+
+        summary = {
+            'flops_total_mean': float(sum(all_flops) / len(all_flops)) if all_flops else 0,
+            'flops_total_std': float(torch.tensor(all_flops).std()) if len(all_flops) > 1 else 0,
+            'latency_mean_ms': float(sum(all_latency) / len(all_latency)) if all_latency else 0,
+            'latency_std_ms': float(torch.tensor(all_latency).std()) if len(all_latency) > 1 else 0,
+        }
 
         # Aggregate expert usage across all questions
         expert_loads_total = {}
@@ -557,12 +604,16 @@ class AccuracyBenchmark:
         self.results[config_name] = analysis_data
 
         # Print summary
+        correct_count = sum(1 for q in questions_data if q['correct'])
         print(f"\n{'='*80}")
         print(f"Analysis Complete: {config_name}")
         print(f"{'='*80}")
-        print(f"  Accuracy:     {accuracy:.2f}%")
+        print(f"  Accuracy:     {accuracy:.2f}% ({correct_count}/{len(questions_data)})")
         print(f"  Mean k:       {k_stats.get('k_mean', 0):.2f}")
         print(f"  K range:      [{k_stats.get('k_min', 0):.1f}, {k_stats.get('k_max', 0):.1f}]")
+        if 'error' not in summary:
+            print(f"  Mean FLOPs:   {summary['flops_total_mean']:.2e}")
+            print(f"  Mean latency: {summary['latency_mean_ms']:.2f} ms")
         print(f"  Questions:    {len(questions_data)}")
         print(f"  Logits saved: {save_logits}")
         print(f"{'='*80}")
