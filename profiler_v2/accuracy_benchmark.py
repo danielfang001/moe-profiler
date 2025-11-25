@@ -9,7 +9,40 @@ import torch
 import pandas as pd
 from typing import Callable, List, Optional, Dict, Any
 from tqdm import tqdm
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
+
+
+# MMLU subjects (all 57)
+MMLU_SUBJECTS = [
+    "abstract_algebra", "anatomy", "astronomy", "business_ethics",
+    "clinical_knowledge", "college_biology", "college_chemistry",
+    "college_computer_science", "college_mathematics", "college_medicine",
+    "college_physics", "computer_security", "conceptual_physics",
+    "econometrics", "electrical_engineering", "elementary_mathematics",
+    "formal_logic", "global_facts", "high_school_biology",
+    "high_school_chemistry", "high_school_computer_science",
+    "high_school_european_history", "high_school_geography",
+    "high_school_government_and_politics", "high_school_macroeconomics",
+    "high_school_mathematics", "high_school_microeconomics",
+    "high_school_physics", "high_school_psychology",
+    "high_school_statistics", "high_school_us_history",
+    "high_school_world_history", "human_aging", "human_sexuality",
+    "international_law", "jurisprudence", "logical_fallacies",
+    "machine_learning", "management", "marketing", "medical_genetics",
+    "miscellaneous", "moral_disputes", "moral_scenarios", "nutrition",
+    "philosophy", "prehistory", "professional_accounting",
+    "professional_law", "professional_medicine", "professional_psychology",
+    "public_relations", "security_studies", "sociology",
+    "us_foreign_policy", "virology", "world_religions"
+]
+
+# MMLU subject sets for different test modes
+MMLU_QUICK = ["abstract_algebra", "anatomy", "astronomy"]  # 3 subjects, ~300-400 questions
+MMLU_MEDIUM = [
+    "abstract_algebra", "anatomy", "astronomy", "business_ethics",
+    "clinical_knowledge", "college_biology", "college_chemistry",
+    "college_mathematics", "computer_security", "philosophy"
+]  # 10 subjects, ~1,500 questions
 
 
 class AccuracyBenchmark:
@@ -42,7 +75,8 @@ class AccuracyBenchmark:
         self,
         name: str = "arc_easy",
         split: str = "test",
-        num_samples: Optional[int] = None
+        num_samples: Optional[int] = None,
+        mmlu_mode: str = "quick"
     ):
         """
         Load a benchmark dataset.
@@ -51,11 +85,15 @@ class AccuracyBenchmark:
             name: Benchmark name
                 - "arc_easy": ARC-Easy (2376 questions, easier)
                 - "arc_challenge": ARC-Challenge (1172 questions, harder)
-                - "mmlu": MMLU (specify subject)
+                - "mmlu": MMLU (use mmlu_mode to specify scope)
                 - "hellaswag": HellaSwag
                 - "piqa": PIQA
             split: Dataset split ("test", "validation", etc.)
-            num_samples: Limit to N samples (for quick testing)
+            num_samples: Limit to N samples (for quick testing, overrides mmlu_mode)
+            mmlu_mode: For MMLU only, choose test scope:
+                - "quick": 3 subjects (~300-400 questions)
+                - "medium": 10 subjects (~1,500 questions)
+                - "full": All 57 subjects (~14,000 questions)
 
         Returns:
             List of evaluation examples
@@ -67,8 +105,28 @@ class AccuracyBenchmark:
         elif name == "arc_challenge":
             dataset = load_dataset("allenai/ai2_arc", "ARC-Challenge", split=split)
         elif name == "mmlu":
-            # Default to a small subject for testing
-            dataset = load_dataset("cais/mmlu", "abstract_algebra", split=split)
+            # Select subjects based on mode
+            if mmlu_mode == "quick":
+                subjects = MMLU_QUICK
+                print(f"  MMLU Quick mode: {len(subjects)} subjects")
+            elif mmlu_mode == "medium":
+                subjects = MMLU_MEDIUM
+                print(f"  MMLU Medium mode: {len(subjects)} subjects")
+            elif mmlu_mode == "full":
+                subjects = MMLU_SUBJECTS
+                print(f"  MMLU Full mode: {len(subjects)} subjects (this will take a while!)")
+            else:
+                raise ValueError(f"Invalid mmlu_mode: {mmlu_mode}. Use 'quick', 'medium', or 'full'")
+
+            # Load and concatenate all selected subjects
+            datasets = []
+            for subject in tqdm(subjects, desc="Loading MMLU subjects"):
+                subject_data = load_dataset("cais/mmlu", subject, split=split)
+                datasets.append(subject_data)
+
+            dataset = concatenate_datasets(datasets)
+            print(f"  Loaded {len(dataset)} total MMLU questions from {len(subjects)} subjects")
+
         elif name == "hellaswag":
             dataset = load_dataset("Rowan/hellaswag", split=split)
         elif name == "piqa":
@@ -76,11 +134,12 @@ class AccuracyBenchmark:
         else:
             raise ValueError(f"Unknown benchmark: {name}")
 
-        # Limit samples if requested
+        # Limit samples if requested (overrides mmlu_mode)
         if num_samples is not None:
             dataset = dataset.select(range(min(num_samples, len(dataset))))
+            print(f"  Limited to {len(dataset)} examples")
 
-        print(f"Loaded {len(dataset)} examples")
+        print(f"Final dataset size: {len(dataset)} examples")
         return dataset
 
     def format_arc_example(self, example):
@@ -335,7 +394,8 @@ def quick_accuracy_test(
     tokenizer,
     profiler,
     benchmark: str = "arc_easy",
-    num_samples: int = 100,
+    num_samples: Optional[int] = None,
+    mmlu_mode: str = "quick",
     selectors: Optional[Dict[str, Callable]] = None
 ):
     """
@@ -346,7 +406,11 @@ def quick_accuracy_test(
         tokenizer: Tokenizer
         profiler: MOEProfiler instance
         benchmark: Benchmark name ("arc_easy", "arc_challenge", "mmlu")
-        num_samples: Number of examples to test (None = all)
+        num_samples: Number of examples to test (None = use full dataset or mmlu_mode)
+        mmlu_mode: For MMLU only, test scope:
+            - "quick": 3 subjects (~300-400 questions)
+            - "medium": 10 subjects (~1,500 questions)
+            - "full": All 57 subjects (~14,000 questions)
         selectors: Dict of {name: selector_fn}
 
     Returns:
@@ -357,17 +421,39 @@ def quick_accuracy_test(
         >>> from profiler_v2.selectors import kneedle_selector
         >>> from functools import partial
         >>>
+        >>> # ARC-Easy (quick test)
         >>> comparison = quick_accuracy_test(
         ...     model, tokenizer, profiler,
         ...     benchmark="arc_easy",
         ...     num_samples=100,
-        ...     selectors={"kneedle_k16": partial(kneedle_selector, k_max=16)}
+        ...     selectors={"kneedle_k8": partial(kneedle_selector, k_max=8)}
+        ... )
+        >>>
+        >>> # MMLU Quick mode (3 subjects, ~300 questions)
+        >>> comparison = quick_accuracy_test(
+        ...     model, tokenizer, profiler,
+        ...     benchmark="mmlu",
+        ...     mmlu_mode="quick",
+        ...     selectors={"kneedle_k8": partial(kneedle_selector, k_max=8)}
+        ... )
+        >>>
+        >>> # MMLU Full mode (57 subjects, ~14k questions)
+        >>> comparison = quick_accuracy_test(
+        ...     model, tokenizer, profiler,
+        ...     benchmark="mmlu",
+        ...     mmlu_mode="full",
+        ...     selectors={"kneedle_k8": partial(kneedle_selector, k_max=8)}
         ... )
     """
     acc_bench = AccuracyBenchmark(model, tokenizer, profiler)
 
     # Load dataset
-    dataset = acc_bench.load_benchmark(benchmark, split="test", num_samples=num_samples)
+    dataset = acc_bench.load_benchmark(
+        benchmark,
+        split="test",
+        num_samples=num_samples,
+        mmlu_mode=mmlu_mode
+    )
 
     # Run baseline
     acc_bench.run_evaluation("baseline", dataset, benchmark, selection_fn=None)

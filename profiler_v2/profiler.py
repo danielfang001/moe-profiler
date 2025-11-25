@@ -285,6 +285,128 @@ class MOEProfiler:
         for wrapper in self.wrappers:
             wrapper.disable()
 
+    def enable_logit_capture(self):
+        """
+        Enable raw router logit capture for all wrappers.
+
+        Use this before inference to save raw router logits for analysis.
+        Call save_logits_to_file() after inference to export to pickle.
+
+        Example:
+            >>> profiler.enable_logit_capture()
+            >>> outputs = model.generate(**inputs, max_new_tokens=50)
+            >>> profiler.save_logits_to_file('router_logits.pkl')
+        """
+        for wrapper in self.wrappers:
+            wrapper.save_logits = True
+        print(f"Enabled logit capture for {len(self.wrappers)} wrappers")
+
+    def disable_logit_capture(self):
+        """Disable raw router logit capture for all wrappers."""
+        for wrapper in self.wrappers:
+            wrapper.save_logits = False
+        print(f"Disabled logit capture for {len(self.wrappers)} wrappers")
+
+    def get_raw_logits(self) -> dict:
+        """
+        Get all captured raw router logits from all wrappers.
+
+        Returns:
+            Dictionary mapping wrapper name to list of logit dictionaries.
+            Each logit dict contains:
+                - 'logits': Tensor of shape [num_tokens, num_experts]
+                - 'shape': Original input shape (batch, seq_len, hidden)
+                - 'step': Step number when captured
+
+        Example:
+            >>> logits = profiler.get_raw_logits()
+            >>> for layer_name, logit_list in logits.items():
+            ...     print(f"{layer_name}: {len(logit_list)} captures")
+            ...     for capture in logit_list:
+            ...         print(f"  Shape: {capture['logits'].shape}")
+        """
+        logits_dict = {}
+        for wrapper in self.wrappers:
+            if len(wrapper.raw_logits) > 0:
+                logits_dict[wrapper.name] = wrapper.raw_logits
+        return logits_dict
+
+    def clear_logits(self):
+        """Clear all captured logits from all wrappers."""
+        for wrapper in self.wrappers:
+            wrapper.raw_logits = []
+        print(f"Cleared logits from {len(self.wrappers)} wrappers")
+
+    def save_logits_to_file(self, filename: str):
+        """
+        Save all captured router logits to a pickle file.
+
+        Args:
+            filename: Output file path (e.g., 'router_logits.pkl')
+
+        The saved file contains:
+            {
+                'model_config': dict,  # Model configuration
+                'num_wrappers': int,   # Number of MoE layers
+                'router_logits': {     # Per-layer logits
+                    'layer_name': [
+                        {
+                            'logits': Tensor[num_tokens, num_experts],
+                            'shape': (batch, seq_len, hidden),
+                            'step': int
+                        },
+                        ...
+                    ],
+                    ...
+                }
+            }
+
+        Example:
+            >>> profiler.enable_logit_capture()
+            >>> outputs = model.generate(**inputs, max_new_tokens=50)
+            >>> profiler.save_logits_to_file('olmoe_router_logits.pkl')
+            >>>
+            >>> # Later, load and analyze:
+            >>> import pickle
+            >>> with open('olmoe_router_logits.pkl', 'rb') as f:
+            ...     data = pickle.load(f)
+            >>> for layer, logits in data['router_logits'].items():
+            ...     print(f"{layer}: {len(logits)} forward passes")
+        """
+        import pickle
+        import os
+
+        logits_dict = self.get_raw_logits()
+
+        if not logits_dict:
+            print("⚠️  No logits captured! Enable with enable_logit_capture() first.")
+            return
+
+        # Prepare save data
+        save_data = {
+            'model_config': {
+                'architecture': self.architecture_info,
+                'num_wrappers': len(self.wrappers),
+            },
+            'router_logits': logits_dict,
+        }
+
+        # Save to file
+        with open(filename, 'wb') as f:
+            pickle.dump(save_data, f)
+
+        file_size_mb = os.path.getsize(filename) / 1024 / 1024
+        total_captures = sum(len(logits) for logits in logits_dict.values())
+
+        print(f"\n✓ Saved router logits to: {filename}")
+        print(f"  File size: {file_size_mb:.2f} MB")
+        print(f"  Layers: {len(logits_dict)}")
+        print(f"  Total captures: {total_captures}")
+        print(f"\nTo load:")
+        print(f"  import pickle")
+        print(f"  with open('{filename}', 'rb') as f:")
+        print(f"      data = pickle.load(f)")
+
     def get_per_layer_summary(self) -> pd.DataFrame:
         """
         Get summary statistics per layer.

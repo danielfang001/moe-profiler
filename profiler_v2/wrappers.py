@@ -71,6 +71,10 @@ class RouterWrapper(nn.Module):
             self.start_event = torch.cuda.Event(enable_timing=True)
             self.end_event = torch.cuda.Event(enable_timing=True)
 
+        # Raw logit capture (for analysis/export)
+        self.save_logits = False
+        self.raw_logits = []  # Stores raw router logits when enabled
+
         # For block wrappers, cache expert modules
         if self.wrapper_type == 'block':
             self._cache_expert_modules()
@@ -140,6 +144,20 @@ class RouterWrapper(nn.Module):
         # Call the wrapped gate
         gate_output = self.wrapped_module(hidden_states, *args, **kwargs)
 
+        # Optionally save raw logits for analysis
+        if self.save_logits:
+            # Extract logits from output (could be tuple or tensor)
+            if isinstance(gate_output, tuple):
+                logits = gate_output[0]
+            else:
+                logits = gate_output
+
+            self.raw_logits.append({
+                'logits': logits.detach().cpu(),
+                'shape': tuple(hidden_states.shape),
+                'step': self.current_step
+            })
+
         # Parse output using handler
         routing_weights, expert_indices = self.handler.parse_router_output(gate_output)
 
@@ -184,6 +202,14 @@ class RouterWrapper(nn.Module):
         hidden_flat = hidden_states.view(-1, hidden_dim)
 
         gate_logits = self.gate(hidden_flat)
+
+        # Optionally save raw logits for analysis
+        if self.save_logits:
+            self.raw_logits.append({
+                'logits': gate_logits.detach().cpu(),
+                'shape': tuple(hidden_states.shape),  # (batch, seq_len, hidden)
+                'step': self.current_step
+            })
 
         # Parse logits to get routing decision
         routing_weights, expert_indices = self.handler.parse_router_output(gate_logits)
