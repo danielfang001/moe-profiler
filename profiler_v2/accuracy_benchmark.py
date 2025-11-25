@@ -388,6 +388,226 @@ class AccuracyBenchmark:
             results_df.to_csv(filename, index=False)
             print(f"Saved {config_name} detailed results to: {filename}")
 
+    def run_evaluation_with_analysis(
+        self,
+        config_name: str,
+        dataset,
+        dataset_name: str,
+        selection_fn: Optional[Callable] = None,
+        max_new_tokens: int = 5,
+        save_logits: bool = True,
+    ):
+        """
+        Run comprehensive evaluation with detailed routing analysis.
+
+        Captures:
+        - Per-question accuracy, k-values, expert usage
+        - Per-layer routing patterns
+        - Router logits (optional)
+        - Expert utilization across all questions
+        - Per-subject analysis (for MMLU)
+
+        Args:
+            config_name: Name for this configuration
+            dataset: HuggingFace dataset
+            dataset_name: Dataset name (for formatting)
+            selection_fn: Selection function (None for baseline)
+            max_new_tokens: Max tokens to generate
+            save_logits: Whether to capture raw router logits
+
+        Returns:
+            Dictionary with comprehensive analysis data
+        """
+        print(f"\n{'='*80}")
+        print(f"Running Comprehensive Analysis: {config_name} on {dataset_name}")
+        print(f"{'='*80}")
+
+        # Apply selection function
+        if selection_fn is not None:
+            self.profiler.set_selection_fn(selection_fn)
+        else:
+            self.profiler.remove_selection_fn()
+
+        # Enable logit capture if requested
+        if save_logits:
+            self.profiler.enable_logit_capture()
+
+        # Storage for detailed results
+        questions_data = []
+
+        # Process each question
+        for i, example in enumerate(tqdm(dataset, desc=f"Analyzing {config_name}")):
+            # Reset metrics for this question
+            self.profiler.reset_metrics()
+
+            # Format example based on dataset
+            if dataset_name.startswith("arc"):
+                formatted = self.format_arc_example(example)
+            elif dataset_name == "mmlu":
+                formatted = self.format_mmlu_example(example)
+            else:
+                raise ValueError(f"Dataset formatting not implemented for: {dataset_name}")
+
+            # Run evaluation
+            result = self.evaluate_example(formatted, max_new_tokens=max_new_tokens)
+
+            # Capture per-layer routing data
+            layers_data = {}
+            for wrapper in self.profiler.wrappers:
+                # Get routing data for this question
+                k_per_token = wrapper.metrics.k_per_token.copy()
+
+                # Compute entropy per token if we have logits
+                router_entropy = []
+                if save_logits and len(wrapper.raw_logits) > 0:
+                    for logit_data in wrapper.raw_logits:
+                        logits = logit_data['logits']
+                        probs = torch.nn.functional.softmax(logits, dim=-1)
+                        entropy = -(probs * torch.log(probs + 1e-12)).sum(dim=-1)
+                        router_entropy.extend(entropy.tolist())
+
+                layers_data[wrapper.name] = {
+                    'k_per_token': k_per_token,
+                    'mean_k': float(sum(k_per_token) / len(k_per_token)) if k_per_token else 0,
+                    'k_variance': float(torch.tensor(k_per_token).var()) if len(k_per_token) > 1 else 0,
+                    'expert_load': dict(wrapper.metrics.expert_loads),  # How many times each expert used
+                    'router_entropy': router_entropy,
+                    'mean_entropy': float(sum(router_entropy) / len(router_entropy)) if router_entropy else 0,
+                }
+
+                # Save logits if enabled
+                if save_logits:
+                    layers_data[wrapper.name]['raw_logits'] = wrapper.raw_logits.copy()
+
+            # Compute aggregates across layers
+            all_k_values = []
+            all_entropies = []
+            for layer_data in layers_data.values():
+                all_k_values.extend(layer_data['k_per_token'])
+                all_entropies.extend(layer_data['router_entropy'])
+
+            # Store comprehensive question data
+            question_data = {
+                'question_id': i,
+                'question_text': formatted['prompt'][:200],  # Truncate for storage
+                'subject': example.get('subject', dataset_name),
+                'dataset': dataset_name,
+                'correct_answer': result['correct_answer'],
+                'prediction': result['prediction'],
+                'generated': result['generated'],
+                'correct': result['correct'],
+
+                # Routing data
+                'layers': layers_data,
+                'avg_k_all_layers': float(sum(all_k_values) / len(all_k_values)) if all_k_values else 0,
+                'max_k_all_layers': float(max(all_k_values)) if all_k_values else 0,
+                'min_k_all_layers': float(min(all_k_values)) if all_k_values else 0,
+                'avg_entropy_all_layers': float(sum(all_entropies) / len(all_entropies)) if all_entropies else 0,
+            }
+
+            questions_data.append(question_data)
+
+            # Progress update every 50 questions
+            if (i + 1) % 50 == 0:
+                correct_so_far = sum(1 for q in questions_data if q['correct'])
+                acc = 100 * correct_so_far / len(questions_data)
+                avg_k = sum(q['avg_k_all_layers'] for q in questions_data) / len(questions_data)
+                print(f"  Progress: {i+1}/{len(dataset)} | Acc: {acc:.1f}% | Avg k: {avg_k:.2f}")
+
+        # Compute summary statistics
+        accuracy = 100 * sum(1 for q in questions_data if q['correct']) / len(questions_data)
+
+        # Get profiler metrics
+        k_stats = self.profiler.get_k_statistics()
+        summary = self.profiler.get_summary()
+
+        # Aggregate expert usage across all questions
+        expert_loads_total = {}
+        for q in questions_data:
+            for layer_name, layer_data in q['layers'].items():
+                for expert_id, count in layer_data['expert_load'].items():
+                    expert_loads_total[expert_id] = expert_loads_total.get(expert_id, 0) + count
+
+        # Disable logit capture
+        if save_logits:
+            self.profiler.disable_logit_capture()
+
+        # Store comprehensive results
+        analysis_data = {
+            'config_name': config_name,
+            'dataset_name': dataset_name,
+            'num_questions': len(questions_data),
+            'accuracy': accuracy,
+            'selection_fn': selection_fn.__name__ if selection_fn and hasattr(selection_fn, '__name__') else config_name,
+
+            # All question data (main analysis data)
+            'questions': questions_data,
+
+            # Aggregate statistics
+            'summary': summary,
+            'k_stats': k_stats,
+            'expert_loads_total': expert_loads_total,
+
+            # Metadata
+            'save_logits': save_logits,
+            'model_config': self.profiler.architecture_info,
+        }
+
+        # Store in results
+        self.results[config_name] = analysis_data
+
+        # Print summary
+        print(f"\n{'='*80}")
+        print(f"Analysis Complete: {config_name}")
+        print(f"{'='*80}")
+        print(f"  Accuracy:     {accuracy:.2f}%")
+        print(f"  Mean k:       {k_stats.get('k_mean', 0):.2f}")
+        print(f"  K range:      [{k_stats.get('k_min', 0):.1f}, {k_stats.get('k_max', 0):.1f}]")
+        print(f"  Questions:    {len(questions_data)}")
+        print(f"  Logits saved: {save_logits}")
+        print(f"{'='*80}")
+
+        return analysis_data
+
+    def save_analysis_to_file(self, config_name: str, filename: str):
+        """
+        Save comprehensive analysis data to pickle file.
+
+        Args:
+            config_name: Which configuration to save
+            filename: Output pickle file
+
+        Example:
+            >>> acc_bench.run_evaluation_with_analysis("kneedle_k8", dataset, "mmlu", ...)
+            >>> acc_bench.save_analysis_to_file("kneedle_k8", "mmlu_kneedle_analysis.pkl")
+        """
+        import pickle
+        import os
+
+        if config_name not in self.results:
+            print(f"⚠️  Config '{config_name}' not found in results")
+            return
+
+        data = self.results[config_name]
+
+        # Save to pickle
+        with open(filename, 'wb') as f:
+            pickle.dump(data, f)
+
+        file_size_mb = os.path.getsize(filename) / 1024 / 1024
+
+        print(f"\n✓ Saved analysis to: {filename}")
+        print(f"  File size: {file_size_mb:.2f} MB")
+        print(f"  Questions: {data['num_questions']}")
+        print(f"  Layers: {len(data['model_config'])}")
+        print(f"  Logits included: {data['save_logits']}")
+        print(f"\nTo load:")
+        print(f"  import pickle")
+        print(f"  with open('{filename}', 'rb') as f:")
+        print(f"      data = pickle.load(f)")
+        print(f"  questions = data['questions']")
+        print(f"  print(f'Accuracy: {{data[\"accuracy\"]:.2f}}%')")
+
 
 def quick_accuracy_test(
     model,
