@@ -122,6 +122,68 @@ def analyze_expert_utilization(questions: List[Dict], plot=True, save_path='expe
     return results
 
 
+def plot_expert_usage_by_router(questions: List[Dict], save_path='expert_usage_by_router.png'):
+    """
+    Plot expert usage split by router/layer as a heatmap.
+
+    Args:
+        questions: List of question dictionaries from analysis data
+        save_path: Where to save plot
+
+    Returns:
+        Dictionary with per-router expert loads
+    """
+    # Collect expert usage per router
+    router_expert_loads = defaultdict(lambda: defaultdict(int))
+
+    for q in questions:
+        for layer_name, layer_data in q['layers'].items():
+            for expert_id, count in layer_data['expert_load'].items():
+                router_expert_loads[layer_name][expert_id] += count
+
+    # Convert to DataFrame for heatmap
+    routers = sorted(router_expert_loads.keys())
+    all_expert_ids = set()
+    for router_loads in router_expert_loads.values():
+        all_expert_ids.update(router_loads.keys())
+    expert_ids = sorted(all_expert_ids)
+
+    # Create matrix: rows = experts, columns = routers
+    matrix = []
+    for expert_id in expert_ids:
+        row = [router_expert_loads[router].get(expert_id, 0) for router in routers]
+        matrix.append(row)
+
+    matrix = np.array(matrix)
+
+    # Create heatmap
+    fig, ax = plt.subplots(figsize=(max(12, len(routers)), max(8, len(expert_ids) * 0.3)))
+
+    im = ax.imshow(matrix, aspect='auto', cmap='YlOrRd')
+
+    # Set ticks
+    ax.set_xticks(np.arange(len(routers)))
+    ax.set_yticks(np.arange(len(expert_ids)))
+    ax.set_xticklabels(routers, rotation=45, ha='right')
+    ax.set_yticklabels(expert_ids)
+
+    # Labels
+    ax.set_xlabel('Router/Layer', fontsize=12)
+    ax.set_ylabel('Expert ID', fontsize=12)
+    ax.set_title('Expert Usage by Router/Layer', fontsize=14, fontweight='bold')
+
+    # Colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Load (# tokens)', rotation=270, labelpad=20)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"✓ Saved router-wise expert usage plot to: {save_path}")
+    plt.close()
+
+    return {router: dict(loads) for router, loads in router_expert_loads.items()}
+
+
 def analyze_per_subject(questions: List[Dict], save_path='subject_analysis.csv'):
     """
     Analyze routing patterns per MMLU subject.
