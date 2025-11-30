@@ -54,7 +54,40 @@ profiler = MOEProfiler(
 )
 ```
 
-### Available Selectors
+### Multi-GPU Profiling
+
+When using models distributed across multiple GPUs (loaded with `device_map='auto'`), the profiler automatically detects and profiles each GPU separately:
+
+```python
+from transformers import AutoModelForCausalLM
+from profiler_v2 import MOEProfiler
+
+# Load model with automatic device distribution
+model = AutoModelForCausalLM.from_pretrained(
+    "allenai/OLMoE-1B-7B-0924-Instruct",
+    device_map="auto"  # Automatically distributes across available GPUs
+)
+
+# Create profiler (auto-detects multi-GPU setup)
+profiler = MOEProfiler(model, enable_multi_gpu=True)
+
+# Run inference
+outputs = model.generate(**inputs, max_new_tokens=50)
+
+# Get per-device metrics
+device_summary = profiler.get_per_device_summary()
+profiler.print_device_stats()
+
+# Full report includes multi-GPU breakdown
+print(profiler.generate_report())
+```
+
+Multi-GPU profiling tracks:
+- **Per-device latency**: Identify bottleneck GPUs
+- **Per-device FLOPs**: Track computation distribution
+- **Per-device memory**: Monitor memory usage across GPUs
+- **Per-device k-distribution**: Verify routing consistency across GPUs
+- **Load imbalance**: Detect if certain devices are underutilized
 
 - `selectors.topk_selector`: Standard top-k selection
 - `selectors.kneedle_selector`: Elbow detection for dynamic k

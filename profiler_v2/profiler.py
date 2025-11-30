@@ -29,6 +29,7 @@ class MOEProfiler:
         warmup_steps: int = 5,
         sampling_rate: int = 1,
         use_cuda_events: bool = True,
+        enable_multi_gpu: bool = True,
     ):
         """
         Initialize profiler for an MoE model.
@@ -39,24 +40,59 @@ class MOEProfiler:
             warmup_steps: Number of initial steps to skip
             sampling_rate: Collect metrics every Nth step
             use_cuda_events: Use CUDA events for timing (more accurate)
+            enable_multi_gpu: Enable multi-GPU profiling support (auto-detects device_map)
         """
         self.model = model
         self.selection_fn = selection_fn
         self.warmup_steps = warmup_steps
         self.sampling_rate = sampling_rate
         self.use_cuda_events = use_cuda_events
+        self.enable_multi_gpu = enable_multi_gpu
 
         self.wrappers: List[RouterWrapper] = []
         self.architecture_info = {}
+        self.device_map = {}  # Maps module names to devices
+
+        # Detect devices being used
+        self._detect_device_map()
 
         # Wrap MoE modules
         self._wrap_moe_modules()
+
+    def _detect_device_map(self):
+        """
+        Detect which devices modules are on (for multi-GPU support).
+        
+        Builds a device_map dictionary that tracks which device each module is on.
+        This is automatically done for models loaded with device_map='auto'.
+        """
+        if not self.enable_multi_gpu:
+            return
+
+        unique_devices = set()
+        for name, module in self.model.named_modules():
+            try:
+                device = next(module.parameters()).device
+                self.device_map[name] = device
+                unique_devices.add(str(device))
+            except StopIteration:
+                # Module has no parameters, skip
+                continue
+
+        if len(unique_devices) > 1:
+            print(f"Multi-GPU setup detected: {len(unique_devices)} devices")
+            print(f"Devices: {sorted(unique_devices)}")
+            for device_str in sorted(unique_devices):
+                modules_on_device = [name for name, dev in self.device_map.items() 
+                                    if str(dev) == device_str]
+                print(f"  {device_str}: {len(modules_on_device)} modules")
 
     def _wrap_moe_modules(self):
         """
         Scan model and wrap MoE modules with appropriate wrappers.
 
         Auto-detects architecture and applies correct wrapper type.
+        Supports models distributed across multiple GPUs via device_map.
         """
         print("Scanning model for MoE modules...")
 
@@ -107,10 +143,13 @@ class MOEProfiler:
 
                 setattr(parent, child_name, wrapper)
 
-                # Move to same device as model
+                # Move wrapper to same device as the wrapped module (for multi-GPU)
                 try:
-                    model_device = next(self.model.parameters()).device
-                    wrapper.to(model_device)
+                    if self.enable_multi_gpu and name in self.device_map:
+                        module_device = self.device_map[name]
+                    else:
+                        module_device = next(self.model.parameters()).device
+                    wrapper.to(module_device)
                 except Exception:
                     pass
 
@@ -216,6 +255,19 @@ class MOEProfiler:
         report.append("MoE Profiling Report")
         report.append("=" * 80)
         report.append("")
+
+        # Multi-GPU info
+        device_summary = self.get_per_device_summary()
+        if device_summary and len(device_summary) > 1:
+            report.append("Multi-GPU Information:")
+            report.append(f"  Number of devices: {len(device_summary)}")
+            for device, stats in sorted(device_summary.items()):
+                report.append(f"  {device}:")
+                report.append(f"    Layers: {stats['num_layers']}")
+                report.append(f"    Steps: {stats['num_steps']}")
+                report.append(f"    Avg Latency: {stats['latency_mean_ms']:.2f}ms")
+                report.append(f"    Avg Memory: {stats['memory_mean_mb']:.1f}MB")
+            report.append("")
 
         # Architecture info
         report.append("Architecture Information:")
@@ -431,6 +483,43 @@ class MOEProfiler:
         per_layer.columns = ['_'.join(col).strip('_') for col in per_layer.columns.values]
 
         return per_layer
+
+    def get_per_device_summary(self) -> dict:
+        """
+        Get summary statistics per device (for multi-GPU profiling).
+
+        Returns:
+            Dictionary mapping device strings to per-device statistics
+        """
+        df = self.get_metrics_df()
+
+        if len(df) == 0:
+            return {}
+
+        device_summaries = {}
+
+        # Group by device if multi-GPU
+        if 'device' in df.columns:
+            for device in df['device'].unique():
+                device_df = df[df['device'] == device]
+
+                if len(device_df) > 0:
+                    device_summaries[device] = {
+                        'num_layers': device_df['layer_name'].nunique(),
+                        'num_steps': len(device_df),
+                        'flops_total_mean': device_df['flops_total'].mean(),
+                        'flops_total_std': device_df['flops_total'].std(),
+                        'latency_mean_ms': device_df['latency_ms'].mean(),
+                        'latency_std_ms': device_df['latency_ms'].std(),
+                        'latency_p95_ms': device_df['latency_ms'].quantile(0.95),
+                        'latency_p99_ms': device_df['latency_ms'].quantile(0.99),
+                        'k_mean': device_df['k_avg'].mean(),
+                        'k_std': device_df['k_avg'].std(),
+                        'memory_mean_mb': device_df['memory_mb'].mean() if 'memory_mb' in device_df else 0,
+                        'memory_max_mb': device_df['memory_mb'].max() if 'memory_mb' in device_df else 0,
+                    }
+
+        return device_summaries
 
     def get_k_statistics(self) -> dict:
         """
@@ -671,6 +760,39 @@ class MOEProfiler:
             print(f"\nFirst 20 k-values: {k_stats['k_values'][:20]}")
 
         print("\n" + "=" * 80)
+
+    def print_device_stats(self):
+        """
+        Print per-device profiling statistics (for multi-GPU setups).
+
+        Useful for identifying load imbalance across devices.
+        """
+        device_summary = self.get_per_device_summary()
+
+        if not device_summary:
+            print("No multi-GPU data available")
+            return
+
+        print("\n" + "=" * 80)
+        print("PER-DEVICE STATISTICS")
+        print("=" * 80)
+
+        print(f"\nTotal devices: {len(device_summary)}\n")
+
+        for device, stats in sorted(device_summary.items()):
+            print(f"Device: {device}")
+            print(f"  Layers: {stats['num_layers']}")
+            print(f"  Steps: {stats['num_steps']}")
+            print(f"  FLOPs (mean): {stats['flops_total_mean']:.2e}")
+            print(f"  Latency (mean): {stats['latency_mean_ms']:.2f}ms")
+            print(f"  Latency (p95):  {stats['latency_p95_ms']:.2f}ms")
+            print(f"  Latency (p99):  {stats['latency_p99_ms']:.2f}ms")
+            print(f"  Memory (mean):  {stats['memory_mean_mb']:.1f}MB")
+            print(f"  Memory (max):   {stats['memory_max_mb']:.1f}MB")
+            print(f"  K (mean):       {stats['k_mean']:.2f}")
+            print()
+
+        print("=" * 80)
 
     def set_selection_fn(self, selection_fn: Callable):
         """

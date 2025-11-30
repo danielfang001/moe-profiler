@@ -65,6 +65,13 @@ class RouterWrapper(nn.Module):
         self.enabled = True
         self.current_step = 0
 
+        # Determine device from module
+        try:
+            module_device = next(module.parameters()).device
+            self.metrics.set_device(module_device)
+        except StopIteration:
+            self.metrics.set_device('cuda:0')
+
         # CUDA events for precise timing
         self.use_cuda_events = torch.cuda.is_available()
         if self.use_cuda_events:

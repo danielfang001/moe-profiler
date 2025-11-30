@@ -6,6 +6,7 @@ Contains the Metrics dataclass and helper functions for statistical analysis.
 
 import pandas as pd
 import numpy as np
+import torch
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -68,12 +69,30 @@ class Metrics:
 
     # Metadata
     device: str = 'cuda:0'
+    device_index: int = 0  # GPU device index for multi-GPU support
     step_count: int = 0
 
     def initialize_expert_loads(self, num_experts: int):
         """Initialize expert_loads dict with correct number of experts."""
         if not self.expert_loads:
             self.expert_loads = {i: 0 for i in range(num_experts)}
+
+    def set_device(self, device):
+        """Set the device for this metrics object (supports 'cuda:0', 'cuda:1', etc.)"""
+        if isinstance(device, str):
+            self.device = device
+            # Extract device index
+            if device.startswith('cuda:'):
+                try:
+                    self.device_index = int(device.split(':')[1])
+                except (ValueError, IndexError):
+                    self.device_index = 0
+        elif isinstance(device, torch.device):
+            self.device = str(device)
+            self.device_index = device.index if device.index is not None else 0
+        else:
+            self.device = str(device)
+            self.device_index = 0
 
     def to_df(self):
         """Convert to pandas DataFrame for easy analysis"""
