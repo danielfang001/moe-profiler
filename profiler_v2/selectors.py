@@ -9,6 +9,7 @@ import torch
 import numpy as np
 import math
 from .metrics import _to_numpy
+from kneed import KneeLocator
 
 
 def topk_selector(routing_probs, orig_indices, x, router_wrapper, k: int = 8, threshold: float = 0.0):
@@ -53,14 +54,12 @@ def topk_selector(routing_probs, orig_indices, x, router_wrapper, k: int = 8, th
 
 def kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int = 8):
     """
-    Kneedle elbow detection selector (proven implementation).
+    Kneedle elbow detection selector using the kneed library.
 
     For each token:
       - Sort probabilities descending
-      - Normalize index x in [0,1]
-      - Normalize probs y in [0,1] by INVERTING: y_norm = (y_max - y) / (y_max - y_min)
-      - Compute distance: y_norm - x_norm (finds elbow on y=x diagonal)
-      - Choose the index with maximum distance as the elbow (k = idx+1)
+      - Use KneeLocator to find the knee point in the sorted curve
+      - The knee index + 1 becomes k
       - Cap k by `k_max` and at least 1
 
     Args:
@@ -84,30 +83,22 @@ def kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int 
         probs_sorted, indices_sorted = torch.sort(probs, descending=True, dim=-1)
         n_experts = probs_sorted.size(-1)
 
-        # normalize x and y (matching proven kneedle implementation)
-        x_norm = torch.linspace(0, 1, steps=n_experts, device=device).unsqueeze(0).expand(probs_sorted.size(0), -1)
-        # normalize y: INVERT so it goes from 0 to 1 (matching proven implementation)
-        # y_norm = (y_max - y) / (y_max - y_min)
-        y_norm = (probs_sorted[:, :1] - probs_sorted) / (probs_sorted[:, :1] - probs_sorted[:, -1:] + 1e-12)
-
-        # distance: find max of (y_norm - x_norm) to detect elbow on y=x diagonal
-        dist = y_norm - x_norm
-
-        # For each token, find index of max distance
-        max_vals, max_idx = torch.max(dist, dim=1)
-        ks = (max_idx + 1).clamp(min=1, max=k_max)
-
-        # Build final indices & vals per token
         final_idxs = []
         final_vals = []
         for i in range(probs_sorted.size(0)):
-            k = int(ks[i].item())
+            row = probs_sorted[i].cpu().numpy()
+            x_data = np.arange(n_experts)
+            y_data = row
+
+            # Use KneeLocator to find the knee point
+            kneedle = KneeLocator(x_data, y_data, curve='convex', direction='decreasing', online=False)
+            k = int(kneedle.elbow) + 1
+
+            k = max(1, min(k, k_max))
             idxs = indices_sorted[i, :k]
             vals = probs_sorted[i, :k]
-            # pad to k_max
             if k < k_max:
                 pad = k_max - k
-                # to resolve expected sequence of equal length, need padding
                 idxs = torch.cat([idxs, torch.full((pad,), -1, dtype=idxs.dtype, device=device)])
                 vals = torch.cat([vals, torch.zeros((pad,), dtype=vals.dtype, device=device)])
             final_idxs.append(idxs)
@@ -125,16 +116,16 @@ def kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int 
             row = arr[i]
             sidx = np.argsort(-row)
             svals = row[sidx]
-            xs = np.linspace(0, 1, n_experts)
-            # INVERT y normalization to match proven implementation: (y_max - y) / (y_max - y_min)
-            ys = (svals[0] - svals) / (svals[0] - svals[-1] + 1e-12)
-            # Distance: find max of (y_norm - x_norm) on y=x diagonal
-            dist = ys - xs
-            max_idx = int(np.argmax(dist))
-            k = max(1, min(k_max, max_idx + 1))
+            x_data = np.arange(n_experts)
+            y_data = svals
+
+            # Use KneeLocator to find the knee point
+            kneedle = KneeLocator(x_data, y_data, curve='convex', direction='decreasing', online=False)
+            k = int(kneedle.elbow) + 1
+
+            k = max(1, min(k, k_max))
             sel_idx = sidx[:k].tolist()
             sel_vals = svals[:k].tolist()
-            # pad
             if k < k_max:
                 sel_idx += [-1] * (k_max - k)
                 sel_vals += [0.0] * (k_max - k)
