@@ -344,8 +344,12 @@ class RouterWrapper(nn.Module):
 
     def reset_metrics(self):
         """Reset all metrics."""
+        # Store device info before resetting
+        old_device = self.metrics.device
         self.metrics = Metrics()
         self.metrics.initialize_expert_loads(self.num_experts)
+        # Restore device info after reset
+        self.metrics.set_device(old_device)
         self.current_step = 0
 
     def enable(self):
