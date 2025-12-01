@@ -5,7 +5,7 @@ import numpy as np
 from safetensors import safe_open
 import matplotlib.pyplot as plt
 
-NUM_RUNS = 10000  # MONTE-CARLO samples
+NUM_RUNS = 1000  # MONTE-CARLO samples
 N_PROBES = 32    # probes per run
 
 def is_mixtral_gate(key):
@@ -27,11 +27,6 @@ def load_router_weights(shard_dir, is_gate_fn):
                     gate_weights[key] = f.get_tensor(key)
 
     return gate_weights
-
-
-# ============================================================
-# Geometric elbow & elbow angle
-# ============================================================
 
 def calculate_geometric_elbow(y):
     y = np.asarray(y)
@@ -63,10 +58,21 @@ def elbow_angle(y, elbowidx):
 
     return np.degrees(np.arccos(cos_angle))
 
+def compute_topk_specialization(W, sorted_probs, k):
+    """
+    Compute expert specialization only among the top-k experts.
+    """
+    # Get top-k expert indices
+    topk_idx = np.argsort(sorted_probs)[-k:][::-1].copy()
 
-# ============================================================
-# Compute metrics for one model
-# ============================================================
+    # Extract weight vectors
+    Wk = W[topk_idx].float()
+    Wn = Wk / (Wk.norm(dim=1, keepdim=True) + 1e-8)
+
+    sim = (Wn @ Wn.T).cpu().numpy()
+    upper = sim[np.triu_indices(k, k=1)]
+
+    return 1 - upper.mean()
 
 def compute_model_metrics(gate_weights, num_runs=NUM_RUNS):
     results = []
@@ -75,19 +81,26 @@ def compute_model_metrics(gate_weights, num_runs=NUM_RUNS):
         layer = int(key.split(".")[2])
         W = W.float()
         hidden_dim = W.shape[1]
+        num_experts = W.shape[0]
 
-        # Structural metrics (not Monte Carlo)
+        # determine appropriate top-k
+        if num_experts == 8:
+            k = 2      # Mixtral
+        elif num_experts == 64:
+            k = 8      # OLMoE
+        else:
+            raise ValueError(f"Unknown expert count {num_experts}")
+
+        # structural metric: norm variance
         norms = torch.norm(W, dim=1).cpu().numpy()
         norm_variance = norms.var()
 
-        Wn = W / (W.norm(dim=1, keepdim=True) + 1e-8)
-        sim = (Wn @ Wn.T).cpu().numpy()
-        upper = sim[np.triu_indices(sim.shape[0], k=1)]
-        specialization = 1 - upper.mean()
-
-        entropy_vals, elbow_vals = [], []
+        entropy_vals = []
+        elbow_vals = []
+        topk_spec_vals = []
 
         for _ in range(num_runs):
+            # Monte Carlo hidden probes
             hidden = torch.randn(N_PROBES, hidden_dim)
             logits = (hidden @ W.T).detach().cpu().numpy()
 
@@ -96,12 +109,22 @@ def compute_model_metrics(gate_weights, num_runs=NUM_RUNS):
 
             sorted_probs = np.sort(probs, axis=1)[:, ::-1].mean(axis=0)
 
+            # elbow metrics
             elbow_idx = calculate_geometric_elbow(sorted_probs)
             elbow_ang = elbow_angle(sorted_probs, elbow_idx)
             entropy = -(sorted_probs * np.log(sorted_probs + 1e-12)).sum()
 
+            # debugging output
+            # print("DEBUG: W shape for layer", layer, "=", W.shape)
+            # print("DEBUG: sorted_probs length =", len(sorted_probs))
+            # print("DEBUG: top-k =", k)
+
+            # compute top-k specialization
+            topk_spec = compute_topk_specialization(W, sorted_probs, k)
+
             entropy_vals.append(entropy)
             elbow_vals.append(elbow_ang)
+            topk_spec_vals.append(topk_spec)
 
         results.append({
             "layer": layer,
@@ -111,16 +134,13 @@ def compute_model_metrics(gate_weights, num_runs=NUM_RUNS):
             "elbow_mean": np.mean(elbow_vals),
             "elbow_std": np.std(elbow_vals),
 
-            "specialization": specialization,
+            "specialization": np.mean(topk_spec_vals),
+            "specialization_std": np.std(topk_spec_vals),
+
             "norm_variance": norm_variance,
         })
 
     return sorted(results, key=lambda x: x["layer"])
-
-
-# ============================================================
-# Compare Mixtral vs OLMoE
-# ============================================================
 
 def compare_models(mixtral_metrics, olmoe_metrics):
     mix_layers = [m["layer"] for m in mixtral_metrics]
@@ -151,7 +171,7 @@ def compare_models(mixtral_metrics, olmoe_metrics):
     plt.plot(mix_layers, [m["specialization"] for m in mixtral_metrics], label="Mixtral")
     plt.plot(olm_layers,  [m["specialization"] for m in olmoe_metrics],  label="OLMoE")
     plt.title("Expert Specialization Comparison")
-    plt.ylabel("1 - Mean Cosine Similarity")
+    plt.ylabel("Top-k Specialization (1 − cosine)")
     plt.xlabel("Layer")
     plt.legend()
 
@@ -166,11 +186,6 @@ def compare_models(mixtral_metrics, olmoe_metrics):
 
     plt.tight_layout()
     plt.show()
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
 
