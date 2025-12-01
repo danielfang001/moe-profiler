@@ -64,6 +64,16 @@ mmlu_8()
 
 ######################################################################
 
+# Display device mapping for MoE gates
+print("=" * 80)
+print("GATE DEVICE MAPPING")
+print("=" * 80)
+for layer_name, device_str in sorted(profiler.device_map.items()):
+    if 'gate' in layer_name.lower() and 'gate_proj' not in layer_name.lower():
+        print(f"  {layer_name:50s} → {device_str}")
+print("=" * 80)
+print()
+
 # Print comprehensive report
 print(profiler.generate_report())
 
