@@ -50,6 +50,97 @@ def topk_selector(routing_probs, orig_indices, x, router_wrapper, k: int = 8, th
                 vals[low_conf_mask, :] = 0.0
         return vals, idx
 
+def geometric_kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int = 8):
+    """
+    Kneedle elbow detection selector (proven implementation).
+
+    For each token:
+      - Sort probabilities descending
+      - Normalize index x in [0,1]
+      - Normalize probs y in [0,1] by INVERTING: y_norm = (y_max - y) / (y_max - y_min)
+      - Compute distance: y_norm - x_norm (finds elbow on y=x diagonal)
+      - Choose the index with maximum distance as the elbow (k = idx+1)
+      - Cap k by `k_max` and at least 1
+
+    Args:
+        routing_probs: [num_tokens, num_experts] probability distribution
+        orig_indices: Original indices (unused)
+        x: Input hidden states (unused)
+        router_wrapper: Reference to wrapper (unused)
+        k_max: Maximum k value
+
+    Returns:
+        Tuple of (vals, idx) with dynamic k per token (padded to k_max)
+    """
+    if routing_probs is None:
+        return None
+
+    is_torch = hasattr(routing_probs, 'detach') and not isinstance(routing_probs, (list, tuple))
+
+    if is_torch:
+        probs = routing_probs.detach()
+        device = probs.device
+        probs_sorted, indices_sorted = torch.sort(probs, descending=True, dim=-1)
+        n_experts = probs_sorted.size(-1)
+
+        # normalize x and y (matching proven kneedle implementation)
+        x_norm = torch.linspace(0, 1, steps=n_experts, device=device).unsqueeze(0).expand(probs_sorted.size(0), -1)
+        # normalize y: INVERT so it goes from 0 to 1 (matching proven implementation)
+        # y_norm = (y_max - y) / (y_max - y_min)
+        y_norm = (probs_sorted[:, :1] - probs_sorted) / (probs_sorted[:, :1] - probs_sorted[:, -1:] + 1e-12)
+
+        # distance: find max of (y_norm - x_norm) to detect elbow on y=x diagonal
+        dist = y_norm - x_norm
+
+        # For each token, find index of max distance
+        max_vals, max_idx = torch.max(dist, dim=1)
+        ks = (max_idx + 1).clamp(min=1, max=k_max)
+
+        # Build final indices & vals per token
+        final_idxs = []
+        final_vals = []
+        for i in range(probs_sorted.size(0)):
+            k = int(ks[i].item())
+            idxs = indices_sorted[i, :k]
+            vals = probs_sorted[i, :k]
+            # pad to k_max
+            if k < k_max:
+                pad = k_max - k
+                # to resolve expected sequence of equal length, need padding
+                idxs = torch.cat([idxs, torch.full((pad,), -1, dtype=idxs.dtype, device=device)])
+                vals = torch.cat([vals, torch.zeros((pad,), dtype=vals.dtype, device=device)])
+            final_idxs.append(idxs)
+            final_vals.append(vals)
+
+        return torch.stack(final_vals, dim=0), torch.stack(final_idxs, dim=0)
+
+    else:
+        # numpy path
+        arr = _to_numpy(routing_probs)
+        n_tokens, n_experts = arr.shape
+        idxs_out = []
+        vals_out = []
+        for i in range(n_tokens):
+            row = arr[i]
+            sidx = np.argsort(-row)
+            svals = row[sidx]
+            xs = np.linspace(0, 1, n_experts)
+            # INVERT y normalization to match proven implementation: (y_max - y) / (y_max - y_min)
+            ys = (svals[0] - svals) / (svals[0] - svals[-1] + 1e-12)
+            # Distance: find max of (y_norm - x_norm) on y=x diagonal
+            dist = ys - xs
+            max_idx = int(np.argmax(dist))
+            k = max(1, min(k_max, max_idx + 1))
+            sel_idx = sidx[:k].tolist()
+            sel_vals = svals[:k].tolist()
+            # pad
+            if k < k_max:
+                sel_idx += [-1] * (k_max - k)
+                sel_vals += [0.0] * (k_max - k)
+            idxs_out.append(sel_idx)
+            vals_out.append(sel_vals)
+        return np.array(vals_out), np.array(idxs_out)
+
 
 def kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int = 8):
     """

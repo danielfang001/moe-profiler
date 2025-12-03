@@ -87,8 +87,9 @@ class AccuracyBenchmark:
                 - "arc_easy": ARC-Easy (2376 questions, easier)
                 - "arc_challenge": ARC-Challenge (1172 questions, harder)
                 - "mmlu": MMLU (use mmlu_mode to specify scope)
-                - "hellaswag": HellaSwag
-                - "piqa": PIQA
+                - "hellaswag": HellaSwag (10,042 questions)
+                - "piqa": PIQA (1,838 questions)
+                - "winogrande": WinoGrande (1,267 questions in validation split)
             split: Dataset split ("test", "validation", etc.)
             num_samples: Limit to N samples (random sampling with fixed seed)
             mmlu_mode: For MMLU only, choose test scope:
@@ -141,6 +142,8 @@ class AccuracyBenchmark:
             dataset = load_dataset("Rowan/hellaswag", split=split)
         elif name == "piqa":
             dataset = load_dataset("ybisk/piqa", split=split)
+        elif name == "winogrande":
+            dataset = load_dataset("allenai/winogrande", "winogrande_xl", split=split)
         else:
             raise ValueError(f"Unknown benchmark: {name}")
 
@@ -192,6 +195,60 @@ class AccuracyBenchmark:
             'prompt': prompt,
             'answer': answer_key,
             'choices': ['A', 'B', 'C', 'D']
+        }
+
+    def format_hellaswag_example(self, example):
+        """Format HellaSwag example as multiple choice prompt."""
+        context = example['ctx']
+        endings = example['endings']
+
+        # Format with context and 4 possible endings
+        prompt = f"Context: {context}\n"
+        for i, ending in enumerate(endings):
+            prompt += f"{chr(65+i)}) {ending}\n"  # A, B, C, D
+        prompt += "Answer:"
+
+        answer_idx = int(example['label'])
+        answer_key = chr(65 + answer_idx)  # Convert 0,1,2,3 to A,B,C,D
+
+        return {
+            'prompt': prompt,
+            'answer': answer_key,
+            'choices': ['A', 'B', 'C', 'D']
+        }
+
+    def format_piqa_example(self, example):
+        """Format PIQA example as multiple choice prompt."""
+        goal = example['goal']
+        sol1 = example['sol1']
+        sol2 = example['sol2']
+
+        prompt = f"Goal: {goal}\nA) {sol1}\nB) {sol2}\nAnswer:"
+
+        answer_idx = example['label']
+        answer_key = 'A' if answer_idx == 0 else 'B'
+
+        return {
+            'prompt': prompt,
+            'answer': answer_key,
+            'choices': ['A', 'B']
+        }
+
+    def format_winogrande_example(self, example):
+        """Format WinoGrande example as multiple choice prompt."""
+        sentence = example['sentence']
+        option1 = example['option1']
+        option2 = example['option2']
+
+        prompt = f"Sentence: {sentence}\nA) {option1}\nB) {option2}\nAnswer:"
+
+        answer = example['answer']
+        answer_key = 'A' if answer == '1' else 'B'
+
+        return {
+            'prompt': prompt,
+            'answer': answer_key,
+            'choices': ['A', 'B']
         }
 
     def evaluate_example(self, example_dict, max_new_tokens: int = 5):
@@ -291,6 +348,12 @@ class AccuracyBenchmark:
                 formatted = self.format_arc_example(example)
             elif dataset_name == "mmlu":
                 formatted = self.format_mmlu_example(example)
+            elif dataset_name == "hellaswag":
+                formatted = self.format_hellaswag_example(example)
+            elif dataset_name == "piqa":
+                formatted = self.format_piqa_example(example)
+            elif dataset_name == "winogrande":
+                formatted = self.format_winogrande_example(example)
             else:
                 raise ValueError(f"Dataset formatting not implemented for: {dataset_name}")
 
@@ -461,6 +524,12 @@ class AccuracyBenchmark:
                 formatted = self.format_arc_example(example)
             elif dataset_name == "mmlu":
                 formatted = self.format_mmlu_example(example)
+            elif dataset_name == "hellaswag":
+                formatted = self.format_hellaswag_example(example)
+            elif dataset_name == "piqa":
+                formatted = self.format_piqa_example(example)
+            elif dataset_name == "winogrande":
+                formatted = self.format_winogrande_example(example)
             else:
                 raise ValueError(f"Dataset formatting not implemented for: {dataset_name}")
 
