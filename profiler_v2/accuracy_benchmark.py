@@ -140,7 +140,7 @@ class AccuracyBenchmark:
 
         elif name == "hellaswag":
             dataset = load_dataset("Rowan/hellaswag", split=split)
-        elif name == "piqa": # Needed to downgrade datasets to 3.6.0 for this to work (likely any <4)
+        elif name == "piqa":
             dataset = load_dataset("ybisk/piqa", split=split, trust_remote_code=True)
         elif name == "winogrande":
             dataset = load_dataset("allenai/winogrande", "winogrande_xl", split=split)
