@@ -38,7 +38,7 @@ def run_benchmark(benchmark_name, selection_fn_name, **selection_params):
     elif benchmark_name == "piqa":
         dataset = acc_bench.load_benchmark("piqa", split="test")
     elif benchmark_name == "winogrande":
-        dataset = acc_bench.load_benchmark("winogrande", split="test")
+        dataset = acc_bench.load_benchmark("winogrande", split="validation")
     else:
         raise ValueError(f"Unknown benchmark: {benchmark_name}")
     
@@ -58,7 +58,7 @@ def run_benchmark(benchmark_name, selection_fn_name, **selection_params):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run OLMoE benchmark evaluations")
     parser.add_argument("--benchmark", default="mmlu", 
-                        choices=["arc_easy", "arc_challenge", "mmlu", "hellaswag", "piqa", "winogrande"],
+                        choices=["arc_easy", "arc_challenge", "mmlu"],
                         help="Benchmark to run (default: mmlu)")
     parser.add_argument("--selector", default="kneedle",
                         choices=["baseline", "kneedle"],
