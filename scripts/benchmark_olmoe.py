@@ -27,6 +27,7 @@ def run_benchmark(benchmark_name, selection_fn_name, **selection_params):
     """Run a benchmark with specified selection function."""
     dataset = None
     
+    # Refer to table 11: https://arxiv.org/pdf/2409.02060
     if benchmark_name == "arc_easy":
         dataset = acc_bench.load_benchmark("arc_easy", split="test")
     elif benchmark_name == "arc_challenge":
@@ -34,9 +35,9 @@ def run_benchmark(benchmark_name, selection_fn_name, **selection_params):
     elif benchmark_name == "mmlu":
         dataset = acc_bench.load_benchmark("mmlu", mmlu_mode="full")
     elif benchmark_name == "hellaswag":
-        dataset = acc_bench.load_benchmark("hellaswag", split="test")
+        dataset = acc_bench.load_benchmark("hellaswag", split="validation")
     elif benchmark_name == "piqa":
-        dataset = acc_bench.load_benchmark("piqa", split="test")
+        dataset = acc_bench.load_benchmark("piqa", split="validation")
     elif benchmark_name == "winogrande":
         dataset = acc_bench.load_benchmark("winogrande", split="validation")
     else:
