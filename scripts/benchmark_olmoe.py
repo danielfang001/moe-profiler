@@ -59,7 +59,7 @@ def run_benchmark(benchmark_name, selection_fn_name, **selection_params):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run OLMoE benchmark evaluations")
     parser.add_argument("--benchmark", default="mmlu", 
-                        choices=["arc_easy", "arc_challenge", "mmlu"],
+                        choices=["arc_easy", "arc_challenge", "mmlu", "hellaswag", "piqa", "winogrande"],
                         help="Benchmark to run (default: mmlu)")
     parser.add_argument("--selector", default="kneedle",
                         choices=["baseline", "kneedle"],
