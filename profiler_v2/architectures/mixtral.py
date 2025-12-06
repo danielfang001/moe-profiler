@@ -30,14 +30,26 @@ class MixtralHandler(BaseArchitectureHandler):
         Detect Mixtral architecture.
 
         Looks for:
-        - 'block_sparse_moe' in module path
-        - Module name ends with '.gate'
-        - Not 'gate_proj' (that's part of expert FFN)
+        - 'block_sparse_moe' in module name (the entire MoE block)
+        - Module type contains 'Mixtral'
+        - Module has 'gate' and 'experts' attributes
         """
+        module_type = type(module).__name__
+
+        # Check if it's a Mixtral sparse MoE block
+        if 'mixtral' in module_type.lower():
+            # Verify it has the expected structure
+            if hasattr(module, 'gate') and hasattr(module, 'experts'):
+                return True
+
+        # Alternative check: module name pattern
         if 'block_sparse_moe' in module_name.lower():
-            if module_name.endswith('.gate'):
-                if 'gate_proj' not in module_name.lower():
+            # Make sure it's the block itself, not a submodule
+            if module_name.endswith('block_sparse_moe'):
+                # Verify structure
+                if hasattr(module, 'gate') and hasattr(module, 'experts'):
                     return True
+
         return False
 
     def get_num_experts(self) -> int:
@@ -147,8 +159,8 @@ class MixtralHandler(BaseArchitectureHandler):
         return confidence
 
     def get_wrapper_type(self) -> str:
-        """Mixtral uses gate-only wrapping."""
-        return 'gate'
+        """Mixtral uses block wrapping for full control over dynamic k."""
+        return 'block'
 
     def get_specs(self) -> Dict[str, Any]:
         """Return all Mixtral specifications."""
@@ -156,7 +168,7 @@ class MixtralHandler(BaseArchitectureHandler):
             'architecture': 'mixtral',
             'num_experts': self.get_num_experts(),  # Use getter to get config value
             'default_top_k': self.get_default_top_k(),  # Use getter
-            'wrapper_type': 'gate',
+            'wrapper_type': 'block',
             'gate_output_format': 'logits',
             'hidden_dim_default': self.hidden_dim_default,
             'expert_dim_default': self.expert_dim_default,
