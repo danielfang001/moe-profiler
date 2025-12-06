@@ -240,6 +240,10 @@ class RouterWrapper(nn.Module):
         except Exception as e:
             print(f"Warning: Custom selector failed: {e}. Using default routing.")
 
+        # Normalize routing weights (important for Mixtral and most MoE models)
+        # Sum weights per token to 1.0 (across selected experts)
+        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+
         # Collect metrics
         self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
 
