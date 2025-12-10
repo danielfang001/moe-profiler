@@ -36,16 +36,7 @@ Available benchmarks: `arc_easy`, `arc_challenge`, `mmlu`, `hellaswag`, `piqa`, 
 
 **Analyze router trends** across layers:
 ```bash
-# For Mixtral
-python scripts/mixtral_router_trends.py
-
-# For OLMoE
 python scripts/olmoe_router_trends.py
-```
-
-**Compare routers**:
-```bash
-python scripts/compare_router.py
 ```
 
 ### Advanced Usage
@@ -53,12 +44,6 @@ python scripts/compare_router.py
 **Multi-GPU profiling**:
 ```bash
 python scripts/example_multi_gpu.py
-```
-
-**Kneedle selector analysis**:
-```bash
-python scripts/kneelocator_mixtral_trends.py  # Mixtral
-python scripts/kneelocator_olmoe_trends.py    # OLMoE
 ```
 
 ## Project Structure
@@ -70,5 +55,5 @@ python scripts/kneelocator_olmoe_trends.py    # OLMoE
   - `accuracy_benchmark.py` - Accuracy evaluation
   - `architectures/` - Architecture-specific support
 - `scripts/` - Example scripts and analysis tools
-- 'notebooks/'
-  - 'elbowanalysis.ipynb' - Elbow and elbow angle analysis 
+- `notebooks/`
+  - `elbowanalysis.ipynb` - Elbow and elbow angle analysis 

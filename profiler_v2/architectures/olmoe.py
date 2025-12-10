@@ -31,7 +31,7 @@ class OLMoEHandler(BaseArchitectureHandler):
 
         For OLMoE, we need to detect the entire MLP block:
         - Module name ends with '.mlp'
-        - Module type contains 'Olmoe' or 'OLMoE' (to distinguish from Mixtral)
+        - Module type contains 'Olmoe' or 'OLMoE'
         - Has 'gate' and 'experts' attributes
         """
         module_type = type(module).__name__
@@ -47,7 +47,6 @@ class OLMoEHandler(BaseArchitectureHandler):
             if hasattr(module, 'gate') and hasattr(module, 'experts'):
                 # Check if gate is nn.Linear (OLMoE signature)
                 if isinstance(module.gate, nn.Linear):
-                    # Additional check: make sure it's OLMoE, not Mixtral
                     if 'olmoe' in module_type.lower():
                         return True
 

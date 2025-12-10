@@ -19,7 +19,7 @@ class RouterWrapper(nn.Module):
     Unified router wrapper that adapts to different architectures.
 
     Supports:
-    - Gate-only wrapping (e.g., Mixtral)
+    - Gate-only wrapping
     - Full block wrapping (e.g., OLMoE)
     - Custom selection functions
     - CUDA-accurate timing
@@ -142,7 +142,7 @@ class RouterWrapper(nn.Module):
 
     def _forward_gate(self, hidden_states, *args, **kwargs):
         """
-        Forward pass for gate-only wrapping (e.g., Mixtral).
+        Forward pass for gate-only wrapping.
 
         The gate returns routing logits or (weights, indices).
         We intercept, optionally apply custom selection, collect metrics.

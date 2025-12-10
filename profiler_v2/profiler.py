@@ -18,7 +18,7 @@ class MOEProfiler:
     """
     Main profiler for MoE models with architecture auto-detection.
 
-    Automatically detects the MoE architecture (Mixtral, OLMoE, etc.)
+    Automatically detects the MoE architecture (e.g., OLMoE)
     and applies appropriate wrappers to collect comprehensive metrics.
     """
 

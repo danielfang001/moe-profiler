@@ -112,7 +112,7 @@ class BaseArchitectureHandler(ABC):
         Return the type of wrapper needed for this architecture.
 
         Returns:
-            'gate' for gate-only wrapping (e.g., Mixtral)
+            'gate' for gate-only wrapping
             'block' for full block wrapping (e.g., OLMoE)
         """
         pass

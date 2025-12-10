@@ -5,13 +5,11 @@ Auto-registers all available handlers and provides detection utilities.
 """
 
 from .base import BaseArchitectureHandler
-from .mixtral import MixtralHandler
 from .olmoe import OLMoEHandler
 
 # Registry of all available handlers
 HANDLERS = [
-    OLMoEHandler(),  # Check OLMoE first (more specific patterns)
-    MixtralHandler(),
+    OLMoEHandler(),
 ]
 
 
@@ -45,7 +43,6 @@ def detect_architecture(module_name: str, module, model_config=None) -> BaseArch
 
 __all__ = [
     'BaseArchitectureHandler',
-    'MixtralHandler',
     'OLMoEHandler',
     'HANDLERS',
     'detect_architecture',
