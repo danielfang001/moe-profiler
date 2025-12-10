@@ -162,14 +162,18 @@ class AccuracyBenchmark:
         return dataset
 
     def format_arc_example(self, example):
-        """Format ARC example as multiple choice prompt."""
+        """Format ARC example as multiple choice prompt (OLMES style)."""
         question = example['question']
         choices = example['choices']
-
-        # Format: Q: ... A) ... B) ... C) ... D) ...
+        
+        # OLMES format: Question: {question}\n A. {choice1}\n B. {choice2}...\nAnswer:
         prompt = f"Question: {question}\n"
         for i, (label, text) in enumerate(zip(choices['label'], choices['text'])):
-            prompt += f"{label}) {text}\n"
+            # Ensure label is A, B, C, D, E...
+            # ARC sometimes has 1, 2, 3, 4 or A, B, C, D, E
+            # We map to A, B, C, D for consistency if needed, but ARC usually has labels.
+            # OLMES uses " A. " prefix.
+            prompt += f" {label}. {text}\n"
         prompt += "Answer:"
 
         # Get correct answer
@@ -182,48 +186,57 @@ class AccuracyBenchmark:
         }
 
     def format_mmlu_example(self, example):
-        """Format MMLU example as multiple choice prompt."""
+        """Format MMLU example as multiple choice prompt (OLMES style)."""
         question = example['question']
         choices = example['choices']
-
-        prompt = f"Question: {question}\nA) {choices[0]}\nB) {choices[1]}\nC) {choices[2]}\nD) {choices[3]}\nAnswer:"
+        
+        # OLMES format: Question: {question}\n A. {choice1}\n B. {choice2}...\nAnswer:
+        prompt = f"Question: {question}\n"
+        labels = ['A', 'B', 'C', 'D']
+        for i, choice in enumerate(choices):
+            prompt += f" {labels[i]}. {choice}\n"
+        prompt += "Answer:"
 
         answer_idx = example['answer']
-        answer_key = ['A', 'B', 'C', 'D'][answer_idx]
+        answer_key = labels[answer_idx]
 
         return {
             'prompt': prompt,
             'answer': answer_key,
-            'choices': ['A', 'B', 'C', 'D']
+            'choices': labels
         }
 
     def format_hellaswag_example(self, example):
-        """Format HellaSwag example as multiple choice prompt."""
+        """Format HellaSwag example for completion likelihood evaluation."""
         context = example['ctx']
         endings = example['endings']
-
-        # Format with context and 4 possible endings
-        prompt = f"Context: {context}\n"
-        for i, ending in enumerate(endings):
-            prompt += f"{chr(65+i)}) {ending}\n"  # A, B, C, D
-        prompt += "Answer:"
-
-        answer_idx = int(example['label'])
-        answer_key = chr(65 + answer_idx)  # Convert 0,1,2,3 to A,B,C,D
-
+        label = int(example['label'])
+        
+        # OLMES/Standard: Calculate P(Ending | Context)
+        # Normalize by character length
+        
+        candidates = []
+        for ending in endings:
+            # Ensure space prefix if needed (standard for HellaSwag)
+            target = " " + ending if not ending.startswith(" ") else ending
+            candidates.append((context, target))
+            
         return {
-            'prompt': prompt,
-            'answer': answer_key,
-            'choices': ['A', 'B', 'C', 'D']
+            'type': 'completion',
+            'candidates': candidates,
+            'answer_idx': label,
+            'normalize': 'char',
+            'prompt': context # For logging
         }
 
     def format_piqa_example(self, example):
-        """Format PIQA example as multiple choice prompt."""
+        """Format PIQA example as multiple choice prompt (OLMES style)."""
         goal = example['goal']
         sol1 = example['sol1']
         sol2 = example['sol2']
-
-        prompt = f"Goal: {goal}\nA) {sol1}\nB) {sol2}\nAnswer:"
+        
+        # OLMES format: Goal: {goal}\n A. {sol1}\n B. {sol2}\nAnswer:
+        prompt = f"Goal: {goal}\n A. {sol1}\n B. {sol2}\nAnswer:"
 
         answer_idx = example['label']
         answer_key = 'A' if answer_idx == 0 else 'B'
@@ -235,33 +248,125 @@ class AccuracyBenchmark:
         }
 
     def format_winogrande_example(self, example):
-        """Format WinoGrande example as multiple choice prompt."""
+        """Format WinoGrande example for partial evaluation."""
         sentence = example['sentence']
         option1 = example['option1']
         option2 = example['option2']
+        answer = example['answer'] # "1" or "2"
+        
+        # Standard Winogrande evaluation:
+        # Context = Prefix + Option
+        # Target = Suffix
+        # Compare P(Suffix | Prefix + Option1) vs P(Suffix | Prefix + Option2)
+        
+        if "_" in sentence:
+            parts = sentence.split("_")
+            prefix = parts[0]
+            suffix = "".join(parts[1:])
+            
+            # Ensure spacing is handled reasonably
+            # If prefix ends with space, good. If option starts with space, good.
+            # Usually simple concatenation works for Winogrande.
+            
+            return {
+                'type': 'completion',
+                'candidates': [
+                    (prefix + option1, suffix),
+                    (prefix + option2, suffix)
+                ],
+                'answer_idx': 0 if answer == '1' else 1,
+                'normalize': False,
+                'prompt': sentence # For logging
+            }
+        else:
+            # Fallback to MCQ if no underscore (shouldn't happen in standard dataset)
+            prompt = f"Fill in the blank: {sentence}\n A. {option1}\n B. {option2}\nAnswer:"
+            return {
+                'prompt': prompt,
+                'answer': 'A' if answer == '1' else 'B',
+                'choices': ['A', 'B']
+            }
 
-        prompt = f"Sentence: {sentence}\nA) {option1}\nB) {option2}\nAnswer:"
-
-        answer = example['answer']
-        answer_key = 'A' if answer == '1' else 'B'
-
+    def evaluate_completion(self, example_dict):
+        """
+        Evaluate using completion likelihood (for HellaSwag, Winogrande).
+        """
+        candidates = example_dict['candidates']
+        answer_idx = example_dict['answer_idx']
+        normalize = example_dict.get('normalize', False)
+        
+        # Prepare batch
+        contexts = [c[0] for c in candidates]
+        targets = [c[1] for c in candidates]
+        full_texts = [c + t for c, t in zip(contexts, targets)]
+        
+        # Tokenize
+        inputs = self.tokenizer(full_texts, return_tensors="pt", padding=True, truncation=True)
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+        
+        # Get context lengths (without padding)
+        # Note: Do NOT use return_tensors="pt" here because contexts have different lengths
+        context_inputs = self.tokenizer(contexts, padding=False)
+        context_lengths = [len(ids) for ids in context_inputs['input_ids']]
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            logits = outputs.logits # (B, L, V)
+            
+        # Calculate log likelihood of targets
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = inputs['input_ids'][..., 1:].contiguous()
+        
+        log_likelihoods = []
+        
+        for i in range(len(candidates)):
+            # Range of interest in shifted arrays
+            # Target starts at context_lengths[i] in original sequence
+            # So in shifted (prediction) array, it starts at context_lengths[i] - 1
+            
+            start_idx = max(0, context_lengths[i] - 1)
+            # End at real length - 1
+            end_idx = inputs['attention_mask'][i].sum().item() - 1
+            
+            if start_idx >= end_idx:
+                log_likelihoods.append(-float('inf'))
+                continue
+                
+            target_logits = shift_logits[i, start_idx:end_idx, :]
+            target_ids = shift_labels[i, start_idx:end_idx]
+            
+            # Gather log probs
+            log_probs = torch.nn.functional.log_softmax(target_logits, dim=-1)
+            target_log_probs = log_probs.gather(1, target_ids.unsqueeze(-1)).squeeze(-1)
+            sum_log_prob = target_log_probs.sum().item()
+            
+            if normalize == 'char':
+                sum_log_prob /= len(targets[i])
+            elif normalize == 'token':
+                sum_log_prob /= (end_idx - start_idx)
+            
+            log_likelihoods.append(sum_log_prob)
+            
+        best_idx = log_likelihoods.index(max(log_likelihoods))
+        correct = (best_idx == answer_idx)
+        
         return {
-            'prompt': prompt,
-            'answer': answer_key,
-            'choices': ['A', 'B']
+            'prompt': example_dict.get('prompt', full_texts[0]),
+            'prediction': best_idx,
+            'correct_answer': answer_idx,
+            'generated': f"Choice {best_idx}", 
+            'correct': correct,
+            'log_likelihoods': log_likelihoods
         }
 
-    def evaluate_example(self, example_dict, max_new_tokens: int = 5):
+    def evaluate_example(self, example_dict, max_new_tokens: int = 1):
         """
         Evaluate a single example.
-
-        Args:
-            example_dict: Dict with 'prompt', 'answer', 'choices'
-            max_new_tokens: Max tokens to generate
-
-        Returns:
-            Dict with prediction and correctness
+        Dispatches to appropriate method based on example type.
         """
+        if example_dict.get('type') == 'completion':
+            return self.evaluate_completion(example_dict)
+
         prompt = example_dict['prompt']
         correct_answer = example_dict['answer']
         choices = example_dict['choices']
@@ -270,26 +375,35 @@ class AccuracyBenchmark:
         inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
 
-        # Generate
+        # Get token IDs for choices (e.g., " A", " B", " C", " D")
+        # Note: OLMES uses " A" (space + letter).
+        choice_tokens = []
+        for choice in choices:
+            # Try " A" first
+            token_str = f" {choice}"
+            token_ids = self.tokenizer.encode(token_str, add_special_tokens=False)
+            
+            # If " A" is multiple tokens, take the last one or fallback to just "A"
+            # Ideally it should be a single token.
+            if len(token_ids) == 1:
+                choice_tokens.append(token_ids[0])
+            else:
+                # Fallback to just the letter if " A" is weird
+                token_ids = self.tokenizer.encode(choice, add_special_tokens=False)
+                choice_tokens.append(token_ids[0])
+
+        # Run forward pass
         with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=self.tokenizer.pad_token_id,
-                temperature=None,
-                top_p=None
-            )
+            outputs = self.model(**inputs)
+            logits = outputs.logits[0, -1, :]  # Last token logits
 
-        # Decode
-        generated_text = self.tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-
-        # Extract prediction (first letter that matches a choice)
-        prediction = None
-        for char in generated_text:
-            if char.upper() in choices:
-                prediction = char.upper()
-                break
+        # Get logits for choice tokens
+        choice_logits = logits[choice_tokens]
+        probs = torch.nn.functional.softmax(choice_logits, dim=0)
+        
+        # Get prediction
+        best_idx = torch.argmax(choice_logits).item()
+        prediction = choices[best_idx]
 
         # Check correctness
         correct = (prediction == correct_answer)
@@ -298,8 +412,9 @@ class AccuracyBenchmark:
             'prompt': prompt,
             'prediction': prediction,
             'correct_answer': correct_answer,
-            'generated': generated_text.strip(),
-            'correct': correct
+            'generated': prediction, # For compatibility
+            'correct': correct,
+            'probs': {c: p.item() for c, p in zip(choices, probs)}
         }
 
     def run_evaluation(
