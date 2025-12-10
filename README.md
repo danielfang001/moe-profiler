@@ -1,6 +1,6 @@
-# MoE Profiler
+# Elbow-Based Routing
 
-A profiler for Mixture of Experts (MoE) models that measures performance metrics and analyzes expert selection patterns.
+A profiler + wrapper for Mixture of Experts (MoE) models that implements elbow-based routing and measures performance metrics.
 
 ## Quick Start
 
@@ -70,3 +70,5 @@ python scripts/kneelocator_olmoe_trends.py    # OLMoE
   - `accuracy_benchmark.py` - Accuracy evaluation
   - `architectures/` - Architecture-specific support
 - `scripts/` - Example scripts and analysis tools
+- 'notebooks/'
+  - 'elbowanalysis.ipynb' - Elbow and elbow angle analysis 
