@@ -389,6 +389,114 @@ class MOEProfiler:
             wrapper.raw_logits = []
         print(f"Cleared logits from {len(self.wrappers)} wrappers")
 
+    def get_expert_loads_by_layer(self) -> dict:
+        """
+        Get expert loads (selection counts) for each layer.
+
+        Returns:
+            Dictionary mapping layer name to expert_loads dict.
+            {
+                'model.layers.0.mlp': {0: 1245, 1: 893, 2: 1102, ...},
+                'model.layers.1.mlp': {0: 1100, 1: 950, ...},
+                ...
+            }
+        """
+        loads_by_layer = {}
+        for wrapper in self.wrappers:
+            loads_by_layer[wrapper.name] = dict(wrapper.metrics.expert_loads)
+        return loads_by_layer
+
+    def get_k_distribution_by_layer(self) -> dict:
+        """
+        Get k-value distributions (experts selected per token) for each layer.
+
+        Returns:
+            Dictionary mapping layer name to list of k values per forward pass.
+            {
+                'model.layers.0.mlp': [[5, 8, 3, ...], [6, 7, ...], ...],
+                ...
+            }
+        """
+        k_dist_by_layer = {}
+        for wrapper in self.wrappers:
+            k_dist_by_layer[wrapper.name] = wrapper.metrics.k_distribution
+        return k_dist_by_layer
+
+    def save_load_balancing_data(self, filename: str, config_name: str = "unnamed"):
+        """
+        Save comprehensive load balancing data to a pickle file.
+
+        Args:
+            filename: Output file path (e.g., 'load_balancing_top8.pkl')
+            config_name: Name for this configuration (e.g., 'top-8', 'elbow-8')
+
+        Saves:
+            {
+                'config_name': str,
+                'architecture_info': dict,
+                'expert_loads_by_layer': {layer_name: {expert_id: count}},
+                'k_distribution_by_layer': {layer_name: [[k values per token]]},
+                'k_stats_by_layer': {layer_name: {'mean': x, 'std': y, ...}},
+                'summary': dict with aggregate stats,
+                'metrics_df': DataFrame with all per-step metrics
+            }
+        """
+        import pickle
+        import os
+        import numpy as np
+
+        expert_loads = self.get_expert_loads_by_layer()
+        k_dist = self.get_k_distribution_by_layer()
+
+        # Compute k stats per layer
+        k_stats_by_layer = {}
+        for layer_name, k_lists in k_dist.items():
+            all_ks = []
+            for k_list in k_lists:
+                all_ks.extend(k_list)
+            if len(all_ks) > 0:
+                k_arr = np.array(all_ks)
+                k_stats_by_layer[layer_name] = {
+                    'mean': float(k_arr.mean()),
+                    'std': float(k_arr.std()),
+                    'min': float(k_arr.min()),
+                    'max': float(k_arr.max()),
+                    'total_tokens': len(all_ks),
+                }
+            else:
+                k_stats_by_layer[layer_name] = {
+                    'mean': 0, 'std': 0, 'min': 0, 'max': 0, 'total_tokens': 0
+                }
+
+        # Get metrics dataframe
+        df = self.get_metrics_df()
+
+        save_data = {
+            'config_name': config_name,
+            'architecture_info': self.architecture_info,
+            'expert_loads_by_layer': expert_loads,
+            'k_distribution_by_layer': k_dist,
+            'k_stats_by_layer': k_stats_by_layer,
+            'summary': self.get_summary(),
+            'metrics_df': df.to_dict() if len(df) > 0 else {},
+        }
+
+        with open(filename, 'wb') as f:
+            pickle.dump(save_data, f)
+
+        file_size_mb = os.path.getsize(filename) / 1024 / 1024
+        total_loads = sum(sum(loads.values()) for loads in expert_loads.values())
+
+        print(f"\n Saved load balancing data to: {filename}")
+        print(f"  Config: {config_name}")
+        print(f"  File size: {file_size_mb:.2f} MB")
+        print(f"  Layers: {len(expert_loads)}")
+        print(f"  Total expert selections: {total_loads}")
+        print(f"\nTo load:")
+        print(f"  import pickle")
+        print(f"  with open('{filename}', 'rb') as f:")
+        print(f"      data = pickle.load(f)")
+
     def save_logits_to_file(self, filename: str):
         """
         Save all captured router logits to a pickle file.
