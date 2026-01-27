@@ -468,17 +468,12 @@ class MOEProfiler:
                     'mean': 0, 'std': 0, 'min': 0, 'max': 0, 'total_tokens': 0
                 }
 
-        # Get metrics dataframe
-        df = self.get_metrics_df()
-
         save_data = {
             'config_name': config_name,
             'architecture_info': self.architecture_info,
             'expert_loads_by_layer': expert_loads,
             'k_distribution_by_layer': k_dist,
             'k_stats_by_layer': k_stats_by_layer,
-            'summary': self.get_summary(),
-            'metrics_df': df.to_dict() if len(df) > 0 else {},
         }
 
         with open(filename, 'wb') as f:
