@@ -206,7 +206,32 @@ class RouterWrapper(nn.Module):
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_flat = hidden_states.view(-1, hidden_dim)
 
-        # Compute gate for metrics (both baseline and custom need this)
+        # If no custom selector, use original model routing (no extra gate computation)
+        if self.selection_fn is None:
+            # Call original block - gate computed only once inside
+            output = self.wrapped_module(hidden_states, *args, **kwargs)
+
+            # Extract router_logits from output for metrics
+            # OLMoE returns (hidden_states, router_logits)
+            if isinstance(output, tuple) and len(output) >= 2:
+                router_logits = output[1]
+                gate_logits = router_logits.view(-1, router_logits.shape[-1])
+
+                # Save logits if requested
+                if self.save_logits:
+                    self.raw_logits.append({
+                        'logits': gate_logits.detach().cpu(),
+                        'shape': tuple(hidden_states.shape),
+                        'step': self.current_step
+                    })
+
+                # Parse and collect metrics
+                routing_weights, expert_indices = self.handler.parse_router_output(gate_logits)
+                self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
+
+            return output
+
+        # Custom selector path: compute gate, apply selector, manual routing
         gate_logits = self.gate(hidden_flat)
 
         # Optionally save raw logits for analysis
@@ -219,15 +244,6 @@ class RouterWrapper(nn.Module):
 
         # Parse logits to get routing decision
         routing_weights, expert_indices = self.handler.parse_router_output(gate_logits)
-
-        # If no custom selector, use original model routing
-        # Note: wrapped_module computes gate again internally, but we use external timing
-        # so this doesn't affect latency measurement
-        if self.selection_fn is None:
-            # Collect metrics
-            self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
-            # Use original optimized routing
-            return self.wrapped_module(hidden_states, *args, **kwargs)
 
         # Apply custom selection
         try:
