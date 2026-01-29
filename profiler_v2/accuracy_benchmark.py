@@ -260,8 +260,10 @@ class AccuracyBenchmark:
             max_new_tokens: Max tokens to generate
 
         Returns:
-            Dict with prediction and correctness
+            Dict with prediction, correctness, and external latency
         """
+        import time
+
         prompt = example_dict['prompt']
         correct_answer = example_dict['answer']
         choices = example_dict['choices']
@@ -270,7 +272,11 @@ class AccuracyBenchmark:
         inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
 
-        # Generate
+        # Generate with external timing
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start_time = time.perf_counter()
+
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -280,6 +286,11 @@ class AccuracyBenchmark:
                 temperature=None,
                 top_p=None
             )
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        end_time = time.perf_counter()
+        latency_ms = (end_time - start_time) * 1000
 
         # Decode
         generated_text = self.tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
@@ -299,7 +310,8 @@ class AccuracyBenchmark:
             'prediction': prediction,
             'correct_answer': correct_answer,
             'generated': generated_text.strip(),
-            'correct': correct
+            'correct': correct,
+            'latency_ms': latency_ms
         }
 
     def run_evaluation(
@@ -587,6 +599,7 @@ class AccuracyBenchmark:
                 'prediction': result['prediction'],
                 'generated': result['generated'],
                 'correct': result['correct'],
+                'latency_ms': result['latency_ms'],  # External timing
 
                 # Routing data
                 'layers': layers_data,
@@ -620,15 +633,16 @@ class AccuracyBenchmark:
             'k_max': float(max(all_max_k)) if all_max_k else 0,
         }
 
-        # Compute summary stats from per-question data (not from profiler, since we reset per question)
+        # Compute summary stats
+        # FLOPs from profiler (per-layer)
         all_flops = []
-        all_latency = []
         for q in questions_data:
             for layer_data in q['layers'].values():
                 if layer_data['mean_flops'] > 0:
                     all_flops.append(layer_data['mean_flops'])
-                if layer_data['mean_latency_ms'] > 0:
-                    all_latency.append(layer_data['mean_latency_ms'])
+
+        # Latency from external timing (accurate, no double-gate issue)
+        all_latency = [q['latency_ms'] for q in questions_data if q.get('latency_ms', 0) > 0]
 
         summary = {
             'flops_total_mean': float(sum(all_flops) / len(all_flops)) if all_flops else 0,

@@ -203,38 +203,46 @@ class RouterWrapper(nn.Module):
         3. Manually route to experts
         4. Return aggregated output
         """
-        # Get routing logits from gate
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_flat = hidden_states.view(-1, hidden_dim)
 
+        # Compute gate for metrics (both baseline and custom need this)
         gate_logits = self.gate(hidden_flat)
 
         # Optionally save raw logits for analysis
         if self.save_logits:
             self.raw_logits.append({
                 'logits': gate_logits.detach().cpu(),
-                'shape': tuple(hidden_states.shape),  # (batch, seq_len, hidden)
+                'shape': tuple(hidden_states.shape),
                 'step': self.current_step
             })
 
         # Parse logits to get routing decision
         routing_weights, expert_indices = self.handler.parse_router_output(gate_logits)
 
-        # Apply custom selection if provided (otherwise use original routing)
-        if self.selection_fn is not None:
-            try:
-                routing_probs = torch.nn.functional.softmax(gate_logits, dim=-1)
-                custom_weights, custom_indices = self.selection_fn(
-                    routing_probs, expert_indices, hidden_flat, self
-                )
+        # If no custom selector, use original model routing
+        # Note: wrapped_module computes gate again internally, but we use external timing
+        # so this doesn't affect latency measurement
+        if self.selection_fn is None:
+            # Collect metrics
+            self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
+            # Use original optimized routing
+            return self.wrapped_module(hidden_states, *args, **kwargs)
 
-                if custom_weights is not None and custom_indices is not None:
-                    routing_weights = custom_weights
-                    expert_indices = custom_indices
-            except Exception as e:
-                print(f"Warning: Custom selector failed: {e}. Using default routing.")
+        # Apply custom selection
+        try:
+            routing_probs = torch.nn.functional.softmax(gate_logits, dim=-1)
+            custom_weights, custom_indices = self.selection_fn(
+                routing_probs, expert_indices, hidden_flat, self
+            )
 
-        # Collect metrics (same code path for baseline and custom selectors)
+            if custom_weights is not None and custom_indices is not None:
+                routing_weights = custom_weights
+                expert_indices = custom_indices
+        except Exception as e:
+            print(f"Warning: Custom selector failed: {e}. Using default routing.")
+
+        # Collect metrics
         self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
 
         # Manually route to experts (similar to OlmoeSparseMoeBlock)
