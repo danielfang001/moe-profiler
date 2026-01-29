@@ -220,27 +220,21 @@ class RouterWrapper(nn.Module):
         # Parse logits to get routing decision
         routing_weights, expert_indices = self.handler.parse_router_output(gate_logits)
 
-        # If no custom selector, use original model routing but still collect metrics
-        if self.selection_fn is None:
-            # Collect metrics for baseline
-            self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
-            # Use original routing
-            return self.wrapped_module(hidden_states, *args, **kwargs)
+        # Apply custom selection if provided (otherwise use original routing)
+        if self.selection_fn is not None:
+            try:
+                routing_probs = torch.nn.functional.softmax(gate_logits, dim=-1)
+                custom_weights, custom_indices = self.selection_fn(
+                    routing_probs, expert_indices, hidden_flat, self
+                )
 
-        # Apply custom selection (we know selection_fn is not None here)
-        try:
-            routing_probs = torch.nn.functional.softmax(gate_logits, dim=-1)
-            custom_weights, custom_indices = self.selection_fn(
-                routing_probs, expert_indices, hidden_flat, self
-            )
+                if custom_weights is not None and custom_indices is not None:
+                    routing_weights = custom_weights
+                    expert_indices = custom_indices
+            except Exception as e:
+                print(f"Warning: Custom selector failed: {e}. Using default routing.")
 
-            if custom_weights is not None and custom_indices is not None:
-                routing_weights = custom_weights
-                expert_indices = custom_indices
-        except Exception as e:
-            print(f"Warning: Custom selector failed: {e}. Using default routing.")
-
-        # Collect metrics
+        # Collect metrics (same code path for baseline and custom selectors)
         self._collect_metrics(hidden_flat, routing_weights, expert_indices, gate_logits)
 
         # Manually route to experts (similar to OlmoeSparseMoeBlock)
