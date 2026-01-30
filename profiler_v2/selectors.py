@@ -144,7 +144,7 @@ def geometric_kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k
 
 def kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int = 8):
     """
-    Kneedle elbow detection selector (vectorized implementation).
+    Kneedle elbow detection selector.
 
     For each token:
       - Sort probabilities descending
@@ -176,32 +176,27 @@ def kneedle_selector(routing_probs, orig_indices, x, router_wrapper, k_max: int 
         num_tokens = probs.size(0)
         n_experts = probs.size(-1)
 
+        # Sort once
         probs_sorted, indices_sorted = torch.sort(probs, descending=True, dim=-1)
 
-        # Normalize x and y (matching proven kneedle implementation)
-        x_norm = torch.linspace(0, 1, steps=n_experts, device=device).unsqueeze(0)
-        # Normalize y: INVERT so it goes from 0 to 1
-        y_norm = (probs_sorted[:, :1] - probs_sorted) / (probs_sorted[:, :1] - probs_sorted[:, -1:] + 1e-12)
-
-        # Distance: find max of (y_norm - x_norm) to detect elbow
+        # Elbow detection (vectorized)
+        x_norm = torch.linspace(0, 1, steps=n_experts, device=device)
+        y_max = probs_sorted[:, 0:1]
+        y_min = probs_sorted[:, -1:]
+        y_norm = (y_max - probs_sorted) / (y_max - y_min + 1e-12)
         dist = y_norm - x_norm
+        ks = (dist.argmax(dim=1) + 1).clamp(min=1, max=k_max)
 
-        # For each token, find index of max distance
-        max_vals, max_idx = torch.max(dist, dim=1)
-        ks = (max_idx + 1).clamp(min=1, max=k_max)  # [num_tokens]
+        # Just take top k_max and mask invalid positions
+        # This avoids per-token loops entirely
+        final_vals = probs_sorted[:, :k_max].clone()
+        final_idxs = indices_sorted[:, :k_max].clone()
 
-        # Vectorized padding: create mask for valid positions
-        # positions [0, k_max) where position < k are valid
-        position_indices = torch.arange(k_max, device=device).unsqueeze(0)  # [1, k_max]
-        valid_mask = position_indices < ks.unsqueeze(1)  # [num_tokens, k_max]
-
-        # Take first k_max from sorted arrays
-        indices_k = indices_sorted[:, :k_max]  # [num_tokens, k_max]
-        vals_k = probs_sorted[:, :k_max]  # [num_tokens, k_max]
-
-        # Apply mask: invalid positions get -1 for indices, 0 for values
-        final_idxs = torch.where(valid_mask, indices_k, torch.tensor(-1, device=device, dtype=indices_k.dtype))
-        final_vals = torch.where(valid_mask, vals_k, torch.tensor(0.0, device=device, dtype=dtype))
+        # Create mask and apply in-place
+        col_idx = torch.arange(k_max, device=device)
+        mask = col_idx >= ks.unsqueeze(1)  # positions to zero out
+        final_vals[mask] = 0.0
+        final_idxs[mask] = -1
 
         return final_vals, final_idxs
 
