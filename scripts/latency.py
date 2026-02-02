@@ -359,13 +359,21 @@ if __name__ == "__main__":
     parser.add_argument("--benchmark", default="mmlu", 
                         choices=["arc_easy", "arc_challenge", "mmlu", "hellaswag", "piqa", "winogrande"],
                         help="Benchmark to run (default: mmlu)")
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=None,
+        help="Number of samples to run (default: full test/validation split)",
+    )
     args = parser.parse_args()
 
-    #Load benchmark
+    # Load benchmark
     test_samples = load_dataset_by_name(args.benchmark)
-    
+
     # Get a subset for testing (e.g., 100 examples from validation set)
-    # test_samples = test_samples['test'].select(range(0,100))
+    if args.num_samples is not None:
+        n = min(args.num_samples, len(test_samples))
+        test_samples = test_samples.select(range(n))
 
     # Convert to list
     test_samples_list = [ex for ex in test_samples]
