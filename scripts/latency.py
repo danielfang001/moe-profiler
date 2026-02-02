@@ -388,7 +388,7 @@ if __name__ == "__main__":
         use_dynamic_forward()
         run_batch(test_samples_list, format_prompt_fn=format_prompt_fn)
         # save
-        with open("dynamiclatency.pkl", "wb") as f:
+        with open(f"{args.benchmark}_dynamic.pkl", "wb") as f:
             pickle.dump(dynamic_topk_stats["latency"]["dynamic_forward_times"], f)
     elif args.method == "original":
         # Test with original
@@ -396,6 +396,6 @@ if __name__ == "__main__":
         print("\nTesting ORIGINAL with batching...")
         run_batch(test_samples_list, format_prompt_fn=format_prompt_fn)
         # save
-        with open("originallatency.pkl", "wb") as f:
+        with open(f"{args.benchmark}_original.pkl", "wb") as f:
             pickle.dump(dynamic_topk_stats["latency"]["original_forward_times"], f)
     compare_latencies()
