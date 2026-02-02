@@ -4,7 +4,6 @@ import time
 import numpy as np
 import pickle
 import argparse
-from profiler_v2 import AccuracyBenchmark
 
 from transformers import OlmoeForCausalLM, AutoTokenizer
 import torch
