@@ -2,6 +2,21 @@ import torch
 import torch.nn.functional as F
 import time
 import numpy as np
+import pickle
+import argparse
+from profiler_v2 import AccuracyBenchmark
+
+from transformers import OlmoeForCausalLM, AutoTokenizer
+import torch
+from datasets import load_dataset
+
+
+DEVICE = "cuda"
+
+# Load different ckpts 
+model = OlmoeForCausalLM.from_pretrained("allenai/OLMoE-1B-7B-0924-Instruct").to(DEVICE)
+tokenizer = AutoTokenizer.from_pretrained("allenai/OLMoE-1B-7B-0924-Instruct")
+
 
 dynamic_topk_stats = {
     "latency": {
@@ -9,6 +24,7 @@ dynamic_topk_stats = {
         "original_forward_times": [],
     }
 }
+
 
 def _cuda_sync_if_needed(x: torch.Tensor):
     if x.is_cuda:
@@ -39,7 +55,6 @@ def _top_k_dynamic_fast(routing_weights: torch.Tensor):
     top_k_index = sorted_idx[:, :MAX_K]
 
     return top_k_weights, top_k_index
-
 
 def forward_with_dynamic_topk_instrumented(self, hidden_states: torch.Tensor):
     # --- correct GPU timing ---
@@ -88,11 +103,9 @@ def forward_with_dynamic_topk_instrumented(self, hidden_states: torch.Tensor):
 
     return final_hidden_states, router_logits
 
-
 def _get_moe_block():
     from transformers.models.olmoe.modeling_olmoe import OlmoeSparseMoeBlock
     return OlmoeSparseMoeBlock
-
 
 def use_original_forward():
     OlmoeSparseMoeBlock = _get_moe_block()
@@ -124,7 +137,6 @@ def use_original_forward():
     OlmoeSparseMoeBlock.forward = forward_original_timed
     print("✓ Switched to ORIGINAL forward (timed)")
 
-
 def use_dynamic_forward():
     OlmoeSparseMoeBlock = _get_moe_block()
 
@@ -143,12 +155,10 @@ def reset_forward():
     else:
         print("⚠ No saved original forward found (call use_* once first)")
 
-
 def reset_stats():
     dynamic_topk_stats["latency"]["dynamic_forward_times"] = []
     dynamic_topk_stats["latency"]["original_forward_times"] = []
     print("✓ Statistics reset")
-
 
 def compare_latencies():
     lat = dynamic_topk_stats["latency"]
@@ -185,34 +195,6 @@ def compare_latencies():
         print(f"  Overhead: {overhead:+.2f}%")
         print("=" * 70)
 
-
-print("\nUsage:")
-print("  reset_stats()           - Clear statistics")
-print("  compare_latencies()     - Show comparison")
-print("  use_original_forward()  - Switch to original (timed)")
-print("  use_dynamic_forward()   - Switch to dynamic (timed)")
-print("  reset_forward()         - Restore the true original")
-
-
-
-from transformers import OlmoeForCausalLM, AutoTokenizer
-import torch
-
-DEVICE = "cuda" 
-
-# Load different ckpts 
-model = OlmoeForCausalLM.from_pretrained("allenai/OLMoE-1B-7B-0924-Instruct").to(DEVICE)
-tokenizer = AutoTokenizer.from_pretrained("allenai/OLMoE-1B-7B-0924-Instruct")
-
-
-
-from datasets import load_dataset
-#Load MMLU dataset
-dataset = load_dataset("cais/mmlu", "all")
-
-# Get a subset for testing (e.g., 100 examples from validation set)
-test_samples = dataset['test'].select(range(0,5))
-
 def format_mmlu_prompt(example):
     """Format MMLU example as a prompt"""
     question = example["question"]
@@ -227,25 +209,125 @@ def format_mmlu_prompt(example):
     
     return prompt
 
-# Test formatting
-sample = test_samples[0]
-print(format_mmlu_prompt(sample))
+def load_dataset_by_name(benchmark_name):
+    if benchmark_name == "mmlu":
+        return load_dataset("cais/mmlu", "all", split='test')
+    elif benchmark_name == "arc_easy":
+        return load_dataset("ai2_arc", "ARC-Easy", split='test')
+    elif benchmark_name == "arc_challenge":
+        return load_dataset("ai2_arc", "ARC-Challenge", split='test')
+    elif benchmark_name == "hellaswag":
+        return load_dataset("hellaswag", split='validation')
+    elif benchmark_name == "piqa":
+        return load_dataset("piqa", split='validation')
+    elif benchmark_name == "winogrande":
+        return load_dataset("winogrande", "winogrande_xl", split='validation')
+    else:
+        raise ValueError(f"Unknown benchmark: {benchmark_name}")
 
-dynamic_topk_stats = {
-    'latency': {
-        'dynamic_forward_times': [],
-        'original_forward_times': [],
-    }
+def format_arc_prompt(example):
+    """Format an AI2 ARC example as a multiple-choice prompt.
+
+    Works with common HF `ai2_arc` schemas, including:
+    - example["question"]["stem"] + example["question"]["choices"]
+    - example["question"] + example["choices"]
+    """
+    q = example.get("question")
+    if isinstance(q, dict):
+        question = q.get("stem", "")
+        raw_choices = q.get("choices")
+    else:
+        question = q
+        raw_choices = example.get("choices")
+
+    pairs = []
+    if isinstance(raw_choices, dict) and "label" in raw_choices and "text" in raw_choices:
+        labels = raw_choices.get("label") or []
+        texts = raw_choices.get("text") or []
+        pairs = list(zip(labels, texts))
+    elif isinstance(raw_choices, list):
+        for item in raw_choices:
+            if isinstance(item, dict):
+                pairs.append((item.get("label"), item.get("text")))
+            else:
+                pairs.append((None, str(item)))
+
+    prompt = f"Question: {question}\n"
+    prompt += "Choices:\n"
+    for i, (label, text) in enumerate(pairs):
+        choice_label = label if label else chr(65 + i)
+        prompt += f"{choice_label}. {text}\n"
+    prompt += "Answer:"
+    return prompt
+
+
+def format_arc_easy_prompt(example):
+    """Format ARC-Easy example as a prompt."""
+    return format_arc_prompt(example)
+
+
+def format_arc_challenge_prompt(example):
+    """Format ARC-Challenge example as a prompt."""
+    return format_arc_prompt(example)
+
+
+def format_hellaswag_prompt(example):
+    """Format HellaSwag example as a prompt."""
+    ctx = example.get("ctx") or example.get("context") or ""
+    endings = example.get("endings") or example.get("choices") or []
+
+    prompt = f"Context: {ctx}\n"
+    prompt += "Choices:\n"
+    for i, ending in enumerate(endings):
+        prompt += f"{chr(65+i)}. {ending}\n"
+    prompt += "Answer:"
+    return prompt
+
+
+def format_piqa_prompt(example):
+    """Format PIQA example as a prompt."""
+    goal = example.get("goal") or ""
+    sol1 = example.get("sol1") or ""
+    sol2 = example.get("sol2") or ""
+
+    prompt = f"Goal: {goal}\n"
+    prompt += "Choices:\n"
+    prompt += f"A. {sol1}\n"
+    prompt += f"B. {sol2}\n"
+    prompt += "Answer:"
+    return prompt
+
+
+def format_winogrande_prompt(example):
+    """Format WinoGrande example as a prompt."""
+    sentence = example.get("sentence") or ""
+    option1 = example.get("option1") or ""
+    option2 = example.get("option2") or ""
+
+    prompt = f"Sentence: {sentence}\n"
+    prompt += "Choices:\n"
+    prompt += f"A. {option1}\n"
+    prompt += f"B. {option2}\n"
+    prompt += "Answer:"
+    return prompt
+
+PROMPT_FORMATTERS = {
+    "mmlu": format_mmlu_prompt,
+    "arc_easy": format_arc_easy_prompt,
+    "arc_challenge": format_arc_challenge_prompt,
+    "hellaswag": format_hellaswag_prompt,
+    "piqa": format_piqa_prompt,
+    "winogrande": format_winogrande_prompt,
 }
 
-# Convert to list first
-test_samples_list = [ex for ex in test_samples]
+def get_prompt_formatter(benchmark: str):
+    return PROMPT_FORMATTERS[benchmark]
 
-def run_mmlu_batch(samples, batch_size=20):
-    """Process MMLU samples in batches"""
+def run_batch(samples, format_prompt_fn=format_mmlu_prompt, batch_size=20):
+    """Process samples in batches"""
     for i in range(0, len(samples), batch_size):
         batch = samples[i:i+batch_size]
-        prompts = [format_mmlu_prompt(ex) for ex in batch]
+        prompts = [format_prompt_fn(ex) for ex in batch]
         
         # Tokenize batch
         inputs = tokenizer(
@@ -269,27 +351,44 @@ def run_mmlu_batch(samples, batch_size=20):
             print(f"Processed {i}/{len(samples)} examples")
 
 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run OLMoE benchmark")
+    parser.add_argument("--method", default="original",
+                        choices=["original", "dynamic"],
+                        help="Selection method to use (default: original)")
+    parser.add_argument("--benchmark", default="mmlu", 
+                        choices=["arc_easy", "arc_challenge", "mmlu", "hellaswag", "piqa", "winogrande"],
+                        help="Benchmark to run (default: mmlu)")
+    args = parser.parse_args()
 
-# Test with dynamic
-print("Testing DYNAMIC with batching...")
-use_dynamic_forward()
-run_mmlu_batch(test_samples_list)
+    #Load benchmark
+    test_samples = load_dataset_by_name(args.benchmark)
+    
+    # Get a subset for testing (e.g., 100 examples from validation set)
+    # test_samples = test_samples['test'].select(range(0,100))
 
-# Test with original
-use_original_forward()
-print("\nTesting ORIGINAL with batching...")
-run_mmlu_batch(test_samples_list)
+    # Convert to list
+    test_samples_list = [ex for ex in test_samples]
 
-compare_latencies()
+    # Get prompt formatter corresponding to benchmark
+    format_prompt_fn = get_prompt_formatter(args.benchmark)
+    # Test formatting
+    print(format_prompt_fn(test_samples[0]))
 
-
-
-import pickle
-
-# save
-with open("dynamiclatency.pkl", "wb") as f:
-    pickle.dump(dynamic_topk_stats["latency"]["dynamic_forward_times"], f)
-
-# save
-with open("originallatency.pkl", "wb") as f:
-    pickle.dump(dynamic_topk_stats["latency"]["original_forward_times"], f)
+    if args.method == "dynamic":
+        # Test with dynamic
+        print("Testing DYNAMIC with batching...")
+        use_dynamic_forward()
+        run_batch(test_samples_list, format_prompt_fn=format_prompt_fn)
+        # save
+        with open("dynamiclatency.pkl", "wb") as f:
+            pickle.dump(dynamic_topk_stats["latency"]["dynamic_forward_times"], f)
+    elif args.method == "original":
+        # Test with original
+        use_original_forward()
+        print("\nTesting ORIGINAL with batching...")
+        run_batch(test_samples_list, format_prompt_fn=format_prompt_fn)
+        # save
+        with open("originallatency.pkl", "wb") as f:
+            pickle.dump(dynamic_topk_stats["latency"]["original_forward_times"], f)
+    compare_latencies()
