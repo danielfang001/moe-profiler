@@ -145,7 +145,6 @@ def use_dynamic_forward():
     OlmoeSparseMoeBlock.forward = forward_with_dynamic_topk_instrumented
     print("✓ Switched to DYNAMIC top-k forward (timed)")
 
-
 def reset_forward():
     OlmoeSparseMoeBlock = _get_moe_block()
     if hasattr(OlmoeSparseMoeBlock, "_forward_true_original"):
@@ -194,20 +193,6 @@ def compare_latencies():
         print(f"  Overhead: {overhead:+.2f}%")
         print("=" * 70)
 
-def format_mmlu_prompt(example):
-    """Format MMLU example as a prompt"""
-    question = example["question"]
-    choices = example["choices"]
-    
-    # Format as multiple choice
-    prompt = f"Question: {question}\n"
-    prompt += "Choices:\n"
-    for i, choice in enumerate(choices):
-        prompt += f"{chr(65+i)}. {choice}\n"  # A, B, C, D
-    prompt += "Answer:"
-    
-    return prompt
-
 def load_dataset_by_name(benchmark_name):
     if benchmark_name == "mmlu":
         return load_dataset("cais/mmlu", "all", split='test')
@@ -223,6 +208,20 @@ def load_dataset_by_name(benchmark_name):
         return load_dataset("winogrande", "winogrande_xl", split='validation')
     else:
         raise ValueError(f"Unknown benchmark: {benchmark_name}")
+
+def format_mmlu_prompt(example):
+    """Format MMLU example as a prompt"""
+    question = example["question"]
+    choices = example["choices"]
+    
+    # Format as multiple choice
+    prompt = f"Question: {question}\n"
+    prompt += "Choices:\n"
+    for i, choice in enumerate(choices):
+        prompt += f"{chr(65+i)}. {choice}\n"  # A, B, C, D
+    prompt += "Answer:"
+    
+    return prompt
 
 def format_arc_prompt(example):
     """Format an AI2 ARC example as a multiple-choice prompt.
@@ -259,17 +258,6 @@ def format_arc_prompt(example):
     prompt += "Answer:"
     return prompt
 
-
-def format_arc_easy_prompt(example):
-    """Format ARC-Easy example as a prompt."""
-    return format_arc_prompt(example)
-
-
-def format_arc_challenge_prompt(example):
-    """Format ARC-Challenge example as a prompt."""
-    return format_arc_prompt(example)
-
-
 def format_hellaswag_prompt(example):
     """Format HellaSwag example as a prompt."""
     ctx = example.get("ctx") or example.get("context") or ""
@@ -281,7 +269,6 @@ def format_hellaswag_prompt(example):
         prompt += f"{chr(65+i)}. {ending}\n"
     prompt += "Answer:"
     return prompt
-
 
 def format_piqa_prompt(example):
     """Format PIQA example as a prompt."""
@@ -295,7 +282,6 @@ def format_piqa_prompt(example):
     prompt += f"B. {sol2}\n"
     prompt += "Answer:"
     return prompt
-
 
 def format_winogrande_prompt(example):
     """Format WinoGrande example as a prompt."""
@@ -312,8 +298,8 @@ def format_winogrande_prompt(example):
 
 PROMPT_FORMATTERS = {
     "mmlu": format_mmlu_prompt,
-    "arc_easy": format_arc_easy_prompt,
-    "arc_challenge": format_arc_challenge_prompt,
+    "arc_easy": format_arc_prompt,
+    "arc_challenge": format_arc_prompt,
     "hellaswag": format_hellaswag_prompt,
     "piqa": format_piqa_prompt,
     "winogrande": format_winogrande_prompt,
@@ -398,4 +384,5 @@ if __name__ == "__main__":
         # save
         with open(f"{args.benchmark}_original.pkl", "wb") as f:
             pickle.dump(dynamic_topk_stats["latency"]["original_forward_times"], f)
+
     compare_latencies()
