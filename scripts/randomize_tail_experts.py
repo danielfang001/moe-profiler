@@ -38,7 +38,7 @@ def _top_k_dynamic_fast_metrics(routing_weights: torch.Tensor):
 
     elbow_scores = y_norm - x_norm.unsqueeze(0)
     elbow_indices = torch.argmax(elbow_scores, dim=1)
-    ks = torch.clamp(elbow_indices + 1, min=1, max=8)
+    ks = torch.clamp(elbow_indices + 1, min=1, max=E)
     return ks
 
 
@@ -78,7 +78,7 @@ def forward_with_random_replacement(self, hidden_states: torch.Tensor, encroachm
 
     elbow_scores = y_norm - x_norm.unsqueeze(0)
     elbow_indices = torch.argmax(elbow_scores, dim=1)
-    ks = torch.clamp(elbow_indices + 1, min=1, max=8)
+    ks = torch.clamp(elbow_indices + 1, min=1, max=num_experts)
 
     # 4. Prepare Top-8 Selection
     # Start with the standard Top-8 experts and weights
